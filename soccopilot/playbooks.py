@@ -5,6 +5,7 @@ core banking, and cloud IAM.
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
 import secrets
 import threading
@@ -67,7 +68,8 @@ class PendingAction:
     params: dict[str, Any]
     digest: str
     created_at: float = field(default_factory=time.time)
-    status: str = "pending"          # pending | approved | declined | executed | expired
+    status: str = "pending"          # pending | approved | declined | executed | expired | failed
+    proposed_by: str = "copilot"     # "copilot" or the analyst who raised it by hand
     decided_by: str | None = None
     decided_at: float | None = None
     execution_result: dict[str, Any] | None = None
@@ -129,13 +131,36 @@ class PlaybookEngine:
         state_store: StateStore | None = None,
         connectors: ConnectorSuite | None = None,
         ttl: float = APPROVAL_TTL_S,
+        allowed_actions: list[str] | None = None,
     ):
         self.audit = audit
         self.state_store = state_store
         self.connectors = connectors or ConnectorSuite()
         self.ttl = ttl
-        self.items: dict[str, PendingAction] = {}
+        self.allowed_actions = set(allowed_actions or PLAYBOOK_SPECS) & set(PLAYBOOK_SPECS)
         self._lock = threading.Lock()
+        # approvals outlive the process: pending ones can still be decided after a restart
+        self.items: dict[str, PendingAction] = {
+            p["action_id"]: PendingAction(**p) for p in (state_store.list_approvals() if state_store else [])
+        }
+
+    def _save(self, act: PendingAction) -> None:
+        if self.state_store:
+            self.state_store.save_approval(act.action_id, act.incident_id, act.status, act.created_at, act.to_dict())
+
+    def validate(self, action_type: str, target: str) -> None:
+        if action_type not in self.allowed_actions:
+            raise ValueError(f"playbook action {action_type!r} is not enabled")
+        if not target or len(target) > 128 or not target.isprintable():
+            raise ValueError("target must be 1-128 printable characters")
+        if action_type == "block_ip":
+            try:
+                ip = ipaddress.ip_address(target)
+            except ValueError as e:
+                raise ValueError(f"block_ip needs an IP address, got {target!r}") from e
+            if not ip.is_global:
+                # blocking an internal or reserved range at the perimeter would cut off the bank itself
+                raise ValueError(f"refusing to block non-public address {target}")
 
     def reset(self) -> None:
         with self._lock:
@@ -149,29 +174,29 @@ class PlaybookEngine:
         target: str,
         rationale: str,
         params: dict[str, Any] | None = None,
+        proposed_by: str = "copilot",
     ) -> PendingAction:
-        if action_type not in PLAYBOOK_SPECS:
-            raise ValueError(f"unknown playbook action: {action_type!r}")
+        self.validate(action_type, target)
         params = dict(params or {})
         digest = action_hash(action_type, incident_id, target, params)
         with self._lock:
-            # Avoid duplicate pending proposals for the exact same call digest
+            # Avoid duplicate proposals for the exact same call digest
             for existing in self.items.values():
-                if existing.digest == digest and existing.status in ("pending", "executed"):
+                if existing.digest == digest and existing.status in ("pending", "approved", "executed"):
                     return existing
             act = PendingAction(
-                action_id=f"ACT-{secrets.token_hex(4).upper()}",
+                action_id=f"ACT-{secrets.token_hex(6).upper()}",
                 incident_id=incident_id,
                 action_type=action_type,
                 target=target,
-                rationale=rationale,
+                rationale=rationale[:1000],
                 connector=PLAYBOOK_SPECS[action_type]["connector"],
                 params=params,
                 digest=digest,
+                proposed_by=proposed_by,
             )
             self.items[act.action_id] = act
-            if self.state_store:
-                self.state_store.save_approval(act.action_id, incident_id, act.status, act.created_at, act.to_dict())
+            self._save(act)
             self.audit.append(
                 "playbook_proposed",
                 action_id=act.action_id,
@@ -179,6 +204,7 @@ class PlaybookEngine:
                 action_type=action_type,
                 target=target,
                 digest=digest,
+                proposed_by=proposed_by,
             )
             return act
 
@@ -191,7 +217,12 @@ class PlaybookEngine:
                 raise ValueError(f"action {action_id} is already {act.status}")
             if time.time() - act.created_at > self.ttl:
                 act.status = "expired"
+                self._save(act)
+                self.audit.append("playbook_expired", action_id=act.action_id, incident_id=act.incident_id)
                 raise ValueError(f"action {action_id} approval expired")
+            if approve and analyst == act.proposed_by:
+                # four eyes: whoever raised an action by hand cannot also approve it
+                raise PermissionError("an action must be approved by someone other than the analyst who proposed it")
             act.status = "approved" if approve else "declined"
             act.decided_by = analyst
             act.decided_at = round(time.time(), 3)
@@ -203,8 +234,7 @@ class PlaybookEngine:
                 analyst=analyst,
                 digest=act.digest,
             )
-            if self.state_store:
-                self.state_store.save_approval(act.action_id, act.incident_id, act.status, act.created_at, act.to_dict())
+            self._save(act)
             return act
 
     def consume_and_execute(
@@ -231,7 +261,15 @@ class PlaybookEngine:
                     expected_digest=act.digest,
                 )
                 raise PermissionError("execution parameters differ from what the analyst approved")
-            res = self.connectors.execute(act.action_type, act.target, act.params)
+            try:
+                res = self.connectors.execute(act.action_type, act.target, act.params)
+            except Exception as e:
+                act.status = "failed"
+                act.execution_result = {"error": f"{type(e).__name__}: {e}"}
+                self._save(act)
+                self.audit.append("playbook_failed", action_id=act.action_id, incident_id=act.incident_id,
+                                  error=act.execution_result["error"])
+                raise
             act.status = "executed"
             act.execution_result = res
             self.audit.append(
@@ -243,8 +281,7 @@ class PlaybookEngine:
                 connector=act.connector,
                 digest=act.digest,
             )
-            if self.state_store:
-                self.state_store.save_approval(act.action_id, act.incident_id, act.status, act.created_at, act.to_dict())
+            self._save(act)
             return act
 
     def decide_and_run(self, action_id: str, approve: bool, analyst: str = "soc.analyst") -> PendingAction:
