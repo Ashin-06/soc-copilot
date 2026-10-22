@@ -2,11 +2,12 @@
 and Splunk BOTS, plus digital banking payment fraud) mixed with a day of normal traffic."""
 from __future__ import annotations
 
+import json
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
-from .correlate import Incident
 from .pipeline import SOCCopilot
 from .triage import TriageReport
 
@@ -578,101 +579,105 @@ def seed_demo_copilot(copilot: SOCCopilot | None = None) -> SOCCopilot:
     return cp
 
 
+def score_campaigns(copilot: SOCCopilot, campaigns: list[CampaignSpec], triage: bool = True) -> dict[str, Any]:
+    """Match each labelled campaign to the incident holding most of its events (at least two)."""
+    detected = linked = 0
+    expected_joined = sum(1 for c in campaigns if c.expects_security_and_fraud)
+    rows: list[dict[str, Any]] = []
+    citation: list[float] = []
+    tactic_recalls: list[float] = []
+    incidents = list(copilot.incidents.values())
+    for camp in campaigns:
+        camp_eids = {e["event_id"] for e in camp.events}
+        best, overlap = None, 0
+        for inc in incidents:
+            n = len(camp_eids & set(inc.event_ids))
+            if n > overlap:
+                best, overlap = inc, n
+        row: dict[str, Any] = {
+            "campaign_id": camp.campaign_id, "title": camp.title, "detected": False, "incident_id": None,
+            "risk_score": 0.0, "severity": "none", "events_correlated": f"0/{len(camp_eids)}",
+            "security_fraud_joined": False, "tactic_recall": 0.0, "citation_coverage": 0.0, "proposed_actions": 0,
+        }
+        if best is not None and overlap >= 2:
+            detected += 1
+            linked += int(camp.expects_security_and_fraud and best.security_fraud_joined)
+            tac_hit = sum(1 for t in camp.expected_tactics if t in best.tactics) / max(1, len(camp.expected_tactics))
+            tactic_recalls.append(tac_hit)
+            row.update(detected=True, incident_id=best.incident_id, risk_score=best.risk_score, severity=best.severity,
+                       events_correlated=f"{overlap}/{len(camp_eids)}", security_fraud_joined=best.security_fraud_joined,
+                       tactic_recall=round(tac_hit, 3))
+            if triage:
+                rep: TriageReport = copilot.triage_engine.triage_incident(best, use_llm=False)
+                citation.append(rep.citation_coverage)
+                row.update(citation_coverage=rep.citation_coverage, proposed_actions=len(rep.recommended_containment))
+        rows.append(row)
+    return {
+        "campaigns_total": len(campaigns),
+        "campaigns_detected": detected,
+        "detection_recall": round(detected / max(1, len(campaigns)), 4),
+        "security_fraud_join_rate": round(linked / max(1, expected_joined), 4),
+        "report_citation_coverage": round(sum(citation) / max(1, len(citation)), 4),
+        "report_tactic_recall": round(sum(tactic_recalls) / max(1, len(tactic_recalls)), 4),
+        "campaigns": rows,
+    }
+
+
 def run_evaluation(benign_count: int = 240) -> dict[str, Any]:
-    """Evaluate SOC Copilot on:
+    """Evaluate SOC Copilot on the built-in labelled campaigns:
     1. Detection recall of labelled multi-stage incidents
-    2. Noise (false-positive incidents per day on normal traffic)
-    3. Speed (mean and max time-to-first-alert in milliseconds)
-    4. Reports (share of AI triage claims backed by a cited valid log entry ID + privacy masking)
+    2. Noise (incidents raised on a day of normal traffic alone)
+    3. Batch latency (ingest through correlation, per campaign batch, in milliseconds)
+    4. Reports (share of triage claims backed by a cited valid log entry ID)
+
+    The detection rules were written with these campaigns in view, so this is a regression
+    check, not an estimate of real-world recall. Use evaluate_labelled_file() on your own data.
     """
     campaigns = build_labelled_campaigns()
     benign_events = build_normal_day_traffic(count=benign_count)
 
-    # 1. Measure false-positive incident noise on a full day of normal traffic alone
     benign_copilot = SOCCopilot()
     benign_copilot.process_raw_events(benign_events, transport="file_drop")
-    false_positive_incidents = len(benign_copilot.incidents)
 
-    # 2. Measure per-campaign time-to-first-alert and combined multi-campaign detection & correlation
     full_copilot = SOCCopilot()
     full_copilot.process_raw_events(benign_events, transport="file_drop")
-
-    ttfa_ms_list: list[float] = []
+    latencies_ms: list[float] = []
     for camp in campaigns:
         t0 = time.perf_counter()
         full_copilot.process_raw_events(camp.events, transport="webhook")
-        ttfa_ms_list.append((time.perf_counter() - t0) * 1000.0)
-
-    detected_campaigns = 0
-    security_fraud_linked = 0
-    expected_sec_fraud = sum(1 for c in campaigns if c.expects_security_and_fraud)
-    campaign_results: list[dict[str, Any]] = []
-    citation_coverages: list[float] = []
-    tactic_recalls: list[float] = []
-
-    incidents_list = list(full_copilot.incidents.values())
-    for camp in campaigns:
-        camp_eids = {e["event_id"] for e in camp.events}
-        matched_inc: Incident | None = None
-        best_overlap = 0
-        for inc in incidents_list:
-            overlap = len(camp_eids & set(inc.event_ids))
-            if overlap > best_overlap:
-                best_overlap = overlap
-                matched_inc = inc
-
-        detected = matched_inc is not None and best_overlap >= 2
-        if detected and matched_inc is not None:
-            detected_campaigns += 1
-            if camp.expects_security_and_fraud and matched_inc.security_fraud_joined:
-                security_fraud_linked += 1
-            rep: TriageReport = full_copilot.triage_engine.triage_incident(matched_inc, use_llm=False)
-            citation_coverages.append(rep.citation_coverage)
-            tac_hit = sum(1 for t in camp.expected_tactics if t in matched_inc.tactics) / max(1, len(camp.expected_tactics))
-            tactic_recalls.append(tac_hit)
-            campaign_results.append({
-                "campaign_id": camp.campaign_id,
-                "title": camp.title,
-                "detected": True,
-                "incident_id": matched_inc.incident_id,
-                "risk_score": matched_inc.risk_score,
-                "severity": matched_inc.severity,
-                "events_correlated": f"{best_overlap}/{len(camp_eids)}",
-                "security_fraud_joined": matched_inc.security_fraud_joined,
-                "tactic_recall": round(tac_hit, 3),
-                "citation_coverage": rep.citation_coverage,
-                "proposed_actions": len(rep.recommended_containment),
-            })
-        else:
-            campaign_results.append({
-                "campaign_id": camp.campaign_id,
-                "title": camp.title,
-                "detected": False,
-                "incident_id": None,
-                "risk_score": 0.0,
-                "severity": "none",
-                "events_correlated": f"0/{len(camp_eids)}",
-                "security_fraud_joined": False,
-                "tactic_recall": 0.0,
-                "citation_coverage": 0.0,
-                "proposed_actions": 0,
-            })
-
-    recall = round(detected_campaigns / len(campaigns), 4)
-    mean_citation = round(sum(citation_coverages) / max(1, len(citation_coverages)), 4)
-    mean_tactic_recall = round(sum(tactic_recalls) / max(1, len(tactic_recalls)), 4)
-    mean_ttfa_ms = round(sum(ttfa_ms_list) / max(1, len(ttfa_ms_list)), 2)
+        latencies_ms.append((time.perf_counter() - t0) * 1000.0)
 
     return {
-        "campaigns_total": len(campaigns),
-        "campaigns_detected": detected_campaigns,
-        "detection_recall": recall,
-        "security_fraud_join_rate": round(security_fraud_linked / max(1, expected_sec_fraud), 4),
-        "false_positive_incidents_per_day": false_positive_incidents,
+        **score_campaigns(full_copilot, campaigns),
+        "false_positive_incidents_per_day": len(benign_copilot.incidents),
         "benign_events_tested": len(benign_events),
-        "mean_time_to_first_alert_ms": mean_ttfa_ms,
-        "max_time_to_first_alert_ms": round(max(ttfa_ms_list), 2),
-        "report_citation_coverage": mean_citation,
-        "report_tactic_recall": mean_tactic_recall,
-        "campaigns": campaign_results,
+        "mean_batch_latency_ms": round(sum(latencies_ms) / max(1, len(latencies_ms)), 2),
+        "max_batch_latency_ms": round(max(latencies_ms), 2),
     }
+
+
+def evaluate_labelled_file(path: str | Path, copilot: SOCCopilot | None = None) -> dict[str, Any]:
+    """Score the pipeline on your own data: a JSONL file of raw events, each with a unique
+    `event_id` (EVT-...) and a `label` naming the incident it belongs to (omit it for benign events),
+    in time order. Incidents that contain no labelled event are counted as false positives."""
+    labelled: dict[str, list[dict[str, Any]]] = {}
+    raw: list[dict[str, Any]] = []
+    for line in Path(path).read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        ev = json.loads(line)
+        label = ev.pop("label", None)
+        if label:
+            labelled.setdefault(str(label), []).append(ev)
+        raw.append(ev)
+    cp = copilot or SOCCopilot()
+    batch = cp.ingest_service.validator.max_batch_size
+    for i in range(0, len(raw), batch):
+        cp.process_raw_events(raw[i : i + batch], transport="file_drop")
+    campaigns = [CampaignSpec(label, label, "", [], False, evs) for label, evs in sorted(labelled.items())]
+    labelled_ids = {e["event_id"] for evs in labelled.values() for e in evs}
+    noise = [i.incident_id for i in cp.incidents.values() if not labelled_ids & set(i.event_ids)]
+    res = score_campaigns(cp, campaigns, triage=False)
+    res.pop("security_fraud_join_rate")
+    res.pop("report_tactic_recall")
+    return {**res, "events": len(raw), "false_positive_incidents": len(noise), "false_positive_incident_ids": noise}

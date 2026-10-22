@@ -112,7 +112,7 @@ def render_app() -> None:
         m1, m2, m3, m4 = st.columns(4)
         m1.metric("Detection Recall", f"{res['detection_recall']*100:.0f}%")
         m2.metric("False-Positive Incidents/Day", str(res["false_positive_incidents_per_day"]))
-        m3.metric("Mean Time-to-First-Alert", f"{res['mean_time_to_first_alert_ms']} ms")
+        m3.metric("Mean Batch Latency", f"{res['mean_batch_latency_ms']:.0f} ms")
         m4.metric("Cited Evidence Coverage", f"{res['report_citation_coverage']*100:.0f}%")
         st.dataframe(pd.DataFrame(res["campaigns"]), use_container_width=True, hide_index=True)
 
