@@ -16,15 +16,37 @@ from .correlate import Incident
 from .normalize import NormalizedEvent
 
 
+COLUMNS = (
+    "event_id", "raw_hash", "timestamp", "iso_timestamp", "source", "event_category", "event_action",
+    "event_outcome", "username", "customer_id", "source_ip", "host", "device_id", "url", "account",
+    "counterparty_account", "amount", "cloud_key", "bytes_out", "message", "entities_json",
+    "enrichment_json", "details_json",
+)
+
+
+def _row_to_event(row: tuple) -> NormalizedEvent:
+    d = dict(zip(COLUMNS, row))
+    d["user"] = d.pop("username")
+    for key in ("entities", "enrichment", "details"):
+        d[key] = json.loads(d.pop(f"{key}_json") or "null") or ([] if key == "entities" else {})
+    return NormalizedEvent.from_dict(d)
+
+
 class EventStore:
-    """Stores normalised events in DuckDB for single-machine OLAP search and timelines."""
+    """Stores normalised events in DuckDB for single-machine OLAP search and timelines.
+    Events are also kept in memory for the correlator; with a file path they are reloaded
+    from DuckDB on start, so a restart does not lose the evidence behind open incidents."""
 
     def __init__(self, path: str | Path | None = None):
         self.path = str(path) if path else ":memory:"
         self._lock = threading.Lock()
         self.conn = duckdb.connect(self.path)
         self._init_schema()
-        self._cache: dict[str, NormalizedEvent] = {}
+        # ponytail: whole event set in memory; page from DuckDB once it outgrows RAM
+        self._cache: dict[str, NormalizedEvent] = {
+            r[0]: _row_to_event(r)
+            for r in self.conn.execute(f"SELECT {', '.join(COLUMNS)} FROM normalized_events").fetchall()
+        }
 
     def _init_schema(self) -> None:
         self.conn.execute(
@@ -124,15 +146,17 @@ class EventStore:
         category: str | None = None,
         limit: int = 25,
     ) -> list[dict[str, Any]]:
+        # contains() is a literal substring test, so % and _ in a query are not wildcards
         clauses: list[str] = ["1=1"]
         params: list[Any] = []
         if query:
-            clauses.append("(LOWER(message) LIKE ? OR LOWER(event_action) LIKE ? OR LOWER(host) LIKE ?)")
-            q = f"%{query.lower()}%"
+            clauses.append("(contains(LOWER(message), ?) OR contains(LOWER(event_action), ?) OR contains(LOWER(host), ?))")
+            q = str(query).lower()
             params.extend([q, q, q])
         if entity:
-            clauses.append("LOWER(entities_json) LIKE ?")
-            params.append(f"%{entity.lower()}%")
+            # match the whole quoted token: ip:10.0.0.1 must not also match ip:10.0.0.15
+            clauses.append("contains(LOWER(entities_json), ?)")
+            params.append(json.dumps(str(entity).lower()))
         if category:
             clauses.append("LOWER(event_category) = ?")
             params.append(category.lower())
@@ -165,7 +189,7 @@ class EventStore:
                 ORDER BY timestamp ASC
                 LIMIT ?
                 """,
-                [customer_id, int(limit)],
+                [customer_id, max(1, min(int(limit), 200))],
             ).fetchall()
         cols = [
             "event_id", "iso_timestamp", "action", "outcome", "account",
