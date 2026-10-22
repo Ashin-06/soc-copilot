@@ -1,0 +1,46 @@
+# SOC Copilot Configuration & Policy
+
+[ingest]
+max_event_bytes = 65536
+max_batch_size = 5000
+dedup_window_seconds = 86400
+default_silence_threshold_seconds = 900
+
+[ingest.sources]
+wazuh = { silence_seconds = 600, required = ["timestamp", "rule"] }
+ecs = { silence_seconds = 600, required = ["@timestamp", "event"] }
+cloudtrail = { silence_seconds = 900, required = ["eventTime", "eventName"] }
+auth = { silence_seconds = 300, required = ["ts", "action"] }
+api_gateway = { silence_seconds = 300, required = ["ts", "path"] }
+payments = { silence_seconds = 300, required = ["ts", "action"] }
+
+[correlate]
+time_window_seconds = 3600
+security_fraud_bonus = 18.0
+min_incident_score = 25.0
+suppressed_ips = ["10.250.0.99"]
+suppressed_users = ["svc-vuln-scanner"]
+
+[scoring]
+severity_weights = { low = 10.0, medium = 22.0, high = 36.0, critical = 52.0 }
+tactic_bonus_per_stage = 7.5
+asset_criticality_weight = 4.0
+money_at_risk_scale = 50000.0
+money_at_risk_max_bonus = 20.0
+
+[triage]
+model = "claude-opus-5-5"
+max_turns = 8
+privacy_role = "fraud_analyst"
+mask_customer_pii = true
+
+[playbooks]
+approval_ttl_seconds = 3600
+allowed_actions = [
+  "freeze_account",
+  "end_sessions",
+  "block_ip",
+  "disable_cloud_key",
+  "require_password_reset",
+  "notify_customer",
+]
