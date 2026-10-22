@@ -27,14 +27,24 @@ class AuditLog:
         self.path = Path(path) if path else None
         raw_key = key if key is not None else os.environ.get("SOCCOPILOT_AUDIT_KEY")
         self.key = raw_key.encode("utf-8") if isinstance(raw_key, str) else raw_key
-        self.entries: list[dict] = []
         self._lock = threading.Lock()
-        if self.path and self.path.exists():
-            self.entries = [
-                json.loads(line)
-                for line in self.path.read_text(encoding="utf-8").splitlines()
-                if line.strip()
-            ]
+        self.entries, problem = self._read()
+        if problem:
+            # fail closed: appending after a damaged line would hide where the damage is
+            raise ValueError(f"audit log {self.path} is damaged ({problem}); investigate before restarting")
+
+    def _read(self) -> tuple[list[dict], str]:
+        if not (self.path and self.path.exists()):
+            return [], ""
+        entries: list[dict] = []
+        for i, line in enumerate(self.path.read_text(encoding="utf-8").splitlines()):
+            if not line.strip():
+                continue
+            try:
+                entries.append(json.loads(line))
+            except json.JSONDecodeError:
+                return entries, f"line {i + 1} is not valid JSON"
+        return entries, ""
 
     def _digest(self, body: dict) -> str:
         data = _canon(body)
@@ -42,7 +52,12 @@ class AuditLog:
             return hmac.new(self.key, data, hashlib.sha256).hexdigest()
         return hashlib.sha256(data).hexdigest()
 
+    RESERVED = ("seq", "ts", "event", "prev", "hash")
+
     def append(self, event: str, **fields) -> dict:
+        clash = [k for k in fields if k in self.RESERVED]
+        if clash:
+            raise ValueError(f"audit fields {clash} would overwrite the chain's own keys")
         with self._lock:
             prev = self.entries[-1]["hash"] if self.entries else self.GENESIS
             body = {
@@ -62,12 +77,12 @@ class AuditLog:
 
     def verify(self) -> tuple[bool, str]:
         entries = list(self.entries)
-        if self.path and self.path.exists():
-            entries = [
-                json.loads(line)
-                for line in self.path.read_text(encoding="utf-8").splitlines()
-                if line.strip()
-            ]
+        if self.path:
+            entries, problem = self._read()
+            if problem:
+                return False, problem
+            if len(entries) < len(self.entries):
+                return False, f"{len(self.entries) - len(entries)} entries missing from the end of the file"
         prev = self.GENESIS
         for i, e in enumerate(entries):
             body = {k: v for k, v in e.items() if k != "hash"}
