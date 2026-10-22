@@ -7,6 +7,11 @@ import streamlit as st
 from soccopilot.evaluate import run_evaluation, seed_demo_copilot
 
 
+@st.cache_data(show_spinner="Running the benchmark…")
+def _benchmark() -> dict:
+    return run_evaluation()
+
+
 def render_app() -> None:
     st.set_page_config(page_title="SOC Copilot · Digital Bank", layout="wide")
     st.title("SOC Copilot for a Digital Bank")
@@ -26,6 +31,9 @@ def render_app() -> None:
             st.session_state.copilot = seed_demo_copilot()
             cp = st.session_state.copilot
             st.rerun()
+        # ponytail: a typed name, like the web console's demo mode; put Streamlit behind SSO for real use
+        analyst = st.text_input("Analyst name", value=st.session_state.get("analyst", ""), placeholder="e.g. meera.k")
+        st.session_state.analyst = analyst.strip()
         ok_chain, chain_msg = cp.audit.verify()
         st.metric("Events in DuckDB", cp.event_store.count())
         st.metric("Active Alerts", len(cp.alerts))
@@ -57,7 +65,7 @@ def render_app() -> None:
                 }
                 for i in incs
             ]
-            st.dataframe(pd.DataFrame(q_rows), use_container_width=True, hide_index=True)
+            st.dataframe(pd.DataFrame(q_rows), width="stretch", hide_index=True)
 
             sel_id = st.selectbox("Inspect Incident", [i.incident_id for i in incs])
             inc = cp.incidents[sel_id]
@@ -86,9 +94,8 @@ def render_app() -> None:
                 st.subheader("Analyst Feedback (Tunes Rule Weights)")
                 verdict = st.radio("Verdict", ["true_positive", "false_positive"], horizontal=True, key=f"v_{sel_id}")
                 reason = st.text_input("Reason", value="Verified multi-stage evidence", key=f"r_{sel_id}")
-                if st.button("Submit Feedback", key=f"fb_{sel_id}"):
-                    fb = cp.correlator.record_feedback(inc, verdict, reason)
-                    cp.state_store.save_incident(inc)
+                if st.button("Submit Feedback", key=f"fb_{sel_id}", disabled=not st.session_state.analyst):
+                    fb = cp.record_feedback(sel_id, verdict, reason, st.session_state.analyst)
                     st.success(f"Updated score to {inc.risk_score}; tuned weights: {fb['updated_rule_weights']}")
 
     with tab_actions:
@@ -99,28 +106,35 @@ def render_app() -> None:
             cols[0].markdown(f"**`{act['action_type']}`** → `{act['target']}` ({act['incident_id']})\n\n{act['rationale']}")
             cols[1].code(f"Status: {act['status']}\nSHA256: {act['digest'][:16]}...")
             if act["status"] == "pending":
-                if cols[2].button("Approve", key=f"ap_{act['action_id']}"):
-                    cp.playbooks.decide_and_run(act["action_id"], approve=True, analyst="soc.streamlit")
-                    st.rerun()
-                if cols[3].button("Decline", key=f"dc_{act['action_id']}"):
-                    cp.playbooks.decide_and_run(act["action_id"], approve=False, analyst="soc.streamlit")
-                    st.rerun()
+                for col, label, approve in ((cols[2], "Approve", True), (cols[3], "Decline", False)):
+                    if col.button(label, key=f"{label}_{act['action_id']}", disabled=not st.session_state.analyst):
+                        try:
+                            cp.decide_action(act["action_id"], approve=approve, analyst=st.session_state.analyst)
+                        except (PermissionError, ValueError) as e:
+                            st.session_state.flash = str(e)
+                        st.rerun()
+        if not st.session_state.analyst:
+            st.info("Enter your analyst name in the sidebar to approve, decline or give feedback.")
+        if st.session_state.get("flash"):
+            st.error(st.session_state.pop("flash"))
 
     with tab_eval:
         st.subheader("Benchmark against 6 Labelled Multi-Stage Campaigns + Normal Day Traffic")
-        res = run_evaluation()
+        st.caption("The rules were tuned on these campaigns: a regression check, not real-world recall. "
+                   "Score your own data with `python -m soccopilot evaluate --labelled events.jsonl`.")
+        res = _benchmark()
         m1, m2, m3, m4 = st.columns(4)
         m1.metric("Detection Recall", f"{res['detection_recall']*100:.0f}%")
         m2.metric("False-Positive Incidents/Day", str(res["false_positive_incidents_per_day"]))
         m3.metric("Mean Batch Latency", f"{res['mean_batch_latency_ms']:.0f} ms")
         m4.metric("Cited Evidence Coverage", f"{res['report_citation_coverage']*100:.0f}%")
-        st.dataframe(pd.DataFrame(res["campaigns"]), use_container_width=True, hide_index=True)
+        st.dataframe(pd.DataFrame(res["campaigns"]), width="stretch", hide_index=True)
 
     with tab_audit:
         st.subheader("Per-Source Health Monitor")
-        st.dataframe(pd.DataFrame(list(cp.ingest_service.health.check_health().values())), use_container_width=True, hide_index=True)
+        st.dataframe(pd.DataFrame(list(cp.ingest_service.health.check_health().values())), width="stretch", hide_index=True)
         st.subheader("Hash-Chained Audit Log")
-        st.dataframe(pd.DataFrame(cp.audit.entries[::-1]), use_container_width=True, hide_index=True)
+        st.dataframe(pd.DataFrame(cp.audit.entries[::-1]), width="stretch", hide_index=True)
 
 
 if __name__ == "__main__":
