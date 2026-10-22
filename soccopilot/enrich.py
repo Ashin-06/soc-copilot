@@ -1,10 +1,16 @@
 """Stage 3 Enrich: Asset inventory, staff directory, customer context, GeoIP + impossible
 travel, and threat intelligence (IP & domain reputation).
+
+The built-in directories are demo data. Point `SOCCOPILOT_CONTEXT` (or `Enricher(context_path=...)`)
+at a JSON export of your CMDB, HR directory, customer risk profiles and threat feeds to replace them.
 """
 from __future__ import annotations
 
+import ipaddress
+import json
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from pathlib import Path
 from typing import Any
 
 from .normalize import NormalizedEvent
@@ -27,8 +33,9 @@ class StaffInfo:
     role: str
     department: str
     privilege_tier: str     # standard | privileged_admin | dba | service
-    usual_hours: tuple[int, int] = (8, 20)
+    usual_hours: tuple[int, int] = (8, 20)   # local time in `timezone`
     usual_countries: tuple[str, ...] = ("IN",)
+    timezone: str = "Asia/Kolkata"
 
 
 @dataclass
@@ -36,9 +43,6 @@ class CustomerProfile:
     customer_id: str
     full_name: str
     account: str
-    pan: str
-    phone: str
-    email: str
     account_age_days: int
     avg_transfer_amount: float
     usual_countries: tuple[str, ...] = ("IN",)
@@ -77,9 +81,6 @@ DEFAULT_CUSTOMERS: dict[str, CustomerProfile] = {
         customer_id="CUST-1042",
         full_name="Mrs. Kavita Deshmukh",
         account="50100984512011",
-        pan="ABCPD4412K",
-        phone="+91 98201 44510",
-        email="kavita.deshmukh@gmail.com",
         account_age_days=840,
         avg_transfer_amount=12000.0,
         usual_countries=("IN",),
@@ -90,9 +91,6 @@ DEFAULT_CUSTOMERS: dict[str, CustomerProfile] = {
         customer_id="CUST-2088",
         full_name="Mr. Siddharth Malhotra",
         account="50100772341908",
-        pan="BMCPM8821F",
-        phone="+91 98112 77890",
-        email="siddharth.m@outlook.com",
         account_age_days=410,
         avg_transfer_amount=18000.0,
         usual_countries=("IN",),
@@ -103,9 +101,6 @@ DEFAULT_CUSTOMERS: dict[str, CustomerProfile] = {
         customer_id="CUST-3015",
         full_name="Dr. Meenakshi Sundaram",
         account="50100339011224",
-        pan="AAHPS9910Q",
-        phone="+91 94440 31209",
-        email="dr.meenakshi@apollo-clinic.in",
         account_age_days=1420,
         avg_transfer_amount=22000.0,
         usual_countries=("IN",),
@@ -116,9 +111,6 @@ DEFAULT_CUSTOMERS: dict[str, CustomerProfile] = {
         customer_id="CUST-4090",
         full_name="Mr. Arjun Nair",
         account="50100612990143",
-        pan="ACDPN5531E",
-        phone="+91 98450 11920",
-        email="arjun.nair@techcorp.in",
         account_age_days=65,
         avg_transfer_amount=8500.0,
         usual_countries=("IN",),
@@ -204,49 +196,67 @@ class Enricher:
     customer context (recent beneficiary/device/phone changes), GeoIP, and Threat Intel.
     """
 
-    def __init__(self):
+    def __init__(self, context_path: str | Path | None = None):
         self.assets: dict[str, AssetInfo] = dict(DEFAULT_ASSETS)
         self.staff: dict[str, StaffInfo] = dict(DEFAULT_STAFF)
+        # customer profiles carry mutable state (recent changes), so each Enricher gets copies
         self.customers: dict[str, CustomerProfile] = {
-            cid: CustomerProfile(
-                customer_id=c.customer_id,
-                full_name=c.full_name,
-                account=c.account,
-                pan=c.pan,
-                phone=c.phone,
-                email=c.email,
-                account_age_days=c.account_age_days,
-                avg_transfer_amount=c.avg_transfer_amount,
-                usual_countries=c.usual_countries,
-                beneficiary_changed_at=c.beneficiary_changed_at,
-                device_changed_at=c.device_changed_at,
-                phone_changed_at=c.phone_changed_at,
-                known_devices=set(c.known_devices),
-                known_beneficiaries=set(c.known_beneficiaries),
-            )
+            cid: replace(c, known_devices=set(c.known_devices), known_beneficiaries=set(c.known_beneficiaries))
             for cid, c in DEFAULT_CUSTOMERS.items()
         }
+        self.geo_prefixes: dict[str, dict[str, Any]] = dict(GEO_PREFIXES)
+        self.threat_ips: dict[str, dict[str, Any]] = dict(THREAT_INTEL_IPS)
+        if context_path:
+            self.load_context(context_path)
         self._account_to_customer: dict[str, str] = {
             c.account: cid for cid, c in self.customers.items()
         }
         self._last_geo_by_actor: dict[str, tuple[float, dict[str, Any]]] = {}
 
+    def load_context(self, path: str | Path) -> None:
+        """Replace the demo directories with the sections present in a JSON context file:
+        {"assets": {host: {...}}, "staff": {username: {...}}, "customers": {id: {...}},
+         "geo_prefixes": {prefix: {...}}, "threat_intel_ips": {ip: {...}}}"""
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+        if "assets" in data:
+            self.assets = {h: AssetInfo(host=h, **v) for h, v in data["assets"].items()}
+        if "staff" in data:
+            self.staff = {
+                u: StaffInfo(username=u, **{**v, "usual_hours": tuple(v.get("usual_hours", (8, 20))),
+                                             "usual_countries": tuple(v.get("usual_countries", ("IN",)))})
+                for u, v in data["staff"].items()
+            }
+        if "customers" in data:
+            self.customers = {
+                cid: CustomerProfile(customer_id=cid, **{**v, "usual_countries": tuple(v.get("usual_countries", ("IN",))),
+                                                          "known_devices": set(v.get("known_devices", [])),
+                                                          "known_beneficiaries": set(v.get("known_beneficiaries", []))})
+                for cid, v in data["customers"].items()
+            }
+        self.geo_prefixes = data.get("geo_prefixes", self.geo_prefixes)
+        self.threat_ips = data.get("threat_intel_ips", self.threat_ips)
+
     def lookup_ip_geo(self, ip: str | None) -> dict[str, Any]:
-        if not ip:
-            return {"country": "UNKNOWN", "city": "Unknown", "lat": 19.0760, "lon": 72.8777}
-        for prefix, geo in GEO_PREFIXES.items():
-            if ip.startswith(prefix):
+        """Country and city, plus coordinates only when the location is actually known.
+        An unknown address is reported as UNKNOWN instead of being placed at head office."""
+        for prefix, geo in self.geo_prefixes.items():
+            if ip and ip.startswith(prefix):
                 return dict(geo)
-        if ip in THREAT_INTEL_IPS:
-            c = THREAT_INTEL_IPS[ip]["country"]
-            return {"country": c, "city": "External", "lat": 52.3676, "lon": 4.9041}
-        return {"country": "IN", "city": "Mumbai", "lat": 19.0760, "lon": 72.8777}
+        try:
+            addr = ipaddress.ip_address(ip or "")
+        except ValueError:
+            return {"country": "UNKNOWN", "city": "Unknown"}
+        if not addr.is_global:
+            return {"country": "INTERNAL", "city": "Private network"}
+        if ip in self.threat_ips:
+            return {"country": self.threat_ips[ip]["country"], "city": "Unknown"}
+        return {"country": "UNKNOWN", "city": "Unknown"}
 
     def lookup_ip_reputation(self, ip: str | None) -> dict[str, Any]:
         if not ip:
             return {"ip": None, "score": 0.0, "malicious": False, "category": "clean", "feeds": []}
-        if ip in THREAT_INTEL_IPS:
-            info = THREAT_INTEL_IPS[ip]
+        if ip in self.threat_ips:
+            info = self.threat_ips[ip]
             return {
                 "ip": ip,
                 "score": info["score"],
@@ -289,6 +299,7 @@ class Enricher:
             enr["staff_department"] = staff.department
             enr["staff_privilege_tier"] = staff.privilege_tier
             enr["staff_usual_hours"] = list(staff.usual_hours)
+            enr["staff_timezone"] = staff.timezone
 
         # 3. GeoIP + impossible travel
         geo = self.lookup_ip_geo(ev.source_ip)
@@ -298,7 +309,7 @@ class Enricher:
         actor_key = ev.customer_id or ev.user
         enr["impossible_travel"] = False
         enr["travel_speed_kmh"] = 0.0
-        if actor_key and ev.source_ip:
+        if actor_key and "lat" in geo:
             prev = self._last_geo_by_actor.get(actor_key)
             if prev is not None:
                 prev_ts, prev_geo = prev
@@ -361,9 +372,6 @@ class Enricher:
             )
             enr["customer_name"] = cust.full_name
             enr["customer_account"] = cust.account
-            enr["customer_pan"] = cust.pan
-            enr["customer_phone"] = cust.phone
-            enr["customer_email"] = cust.email
             enr["account_age_days"] = cust.account_age_days
             enr["avg_transfer_amount"] = cust.avg_transfer_amount
             enr["amount_to_avg_ratio"] = round(ev.amount / max(cust.avg_transfer_amount, 1.0), 2) if ev.amount > 0 else 0.0

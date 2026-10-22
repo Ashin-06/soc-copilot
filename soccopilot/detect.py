@@ -302,7 +302,7 @@ class BehaviorBaseline:
         # 4. Payment fraud baseline: SIM/device change + high transfer ratio or risky account modification
         if ev.source == "payments":
             if ev.event_action in ("device_changed", "phone_changed") and (
-                ev.enrichment.get("ip_malicious") or ev.enrichment.get("geo_country") not in ("IN", "UNKNOWN")
+                ev.enrichment.get("ip_malicious") or ev.enrichment.get("geo_country") not in ("IN", "UNKNOWN", "INTERNAL")
             ):
                 alerts.append(
                     Alert(
