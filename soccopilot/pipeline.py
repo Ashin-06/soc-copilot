@@ -9,7 +9,7 @@ from .audit import AuditLog
 from .correlate import Correlator, Incident
 from .detect import Alert, DetectionEngine
 from .enrich import Enricher
-from .ingest import IngestService
+from .ingest import IngestBatchResult, IngestService
 from .normalize import NormalizedEvent, normalize_envelope
 from .playbooks import PlaybookEngine
 from .store import EventStore, StateStore
@@ -43,7 +43,6 @@ class SOCCopilot:
         )
         self.alerts: list[Alert] = []
         self.incidents: dict[str, Incident] = {}
-        self._event_seq = 0
 
     def reset(self) -> None:
         self.event_store.clear()
@@ -55,8 +54,17 @@ class SOCCopilot:
         self.playbooks.reset()
         self.alerts.clear()
         self.incidents.clear()
-        self._event_seq = 0
         self.audit.append("system_reset")
+
+    def _claim_event_id(self, ev: NormalizedEvent, taken: set[str]) -> None:
+        """Event IDs are evidence references: a reused source ID gets a hash suffix instead of
+        overwriting the event already stored under that ID."""
+        base, n = ev.event_id, 1
+        while ev.event_id in taken or self.event_store.get(ev.event_id) is not None:
+            ev.details.setdefault("source_event_id", base)
+            ev.event_id = f"{base}-{ev.raw_hash[:8].upper()}" + (f"-{n}" if n > 1 else "")
+            n += 1
+        taken.add(ev.event_id)
 
     def process_raw_events(
         self,
@@ -67,16 +75,27 @@ class SOCCopilot:
     ) -> dict[str, Any]:
         t0 = time.perf_counter()
         batch = self.ingest_service.ingest_batch(raw_events, source=source, transport=transport)
+        return self._process(batch, transport, auto_triage, t0)
+
+    def process_file(self, path: str | Path, source: str | None = None, auto_triage: bool = False) -> dict[str, Any]:
+        t0 = time.perf_counter()
+        return self._process(self.ingest_service.ingest_file(path, source=source), "file_drop", auto_triage, t0)
+
+    def _process(self, batch: IngestBatchResult, transport: str, auto_triage: bool, t0: float) -> dict[str, Any]:
         normalized_batch: list[NormalizedEvent] = []
         new_alerts: list[Alert] = []
+        rejected = list(batch.rejected)
+        taken: set[str] = set()
 
         for env in batch.accepted:
-            self._event_seq += 1
-            ev = normalize_envelope(env, seq=self._event_seq)
-            ev = self.enricher.enrich(ev)
+            try:
+                ev = self.enricher.enrich(normalize_envelope(env))
+            except Exception as e:  # one unparseable event must not drop the rest of the batch
+                rejected.append({"event_hash": env.event_hash, "reason": f"normalisation failed: {type(e).__name__}"})
+                continue
+            self._claim_event_id(ev, taken)
             normalized_batch.append(ev)
-            fired = self.detector.evaluate_event(ev)
-            new_alerts.extend(fired)
+            new_alerts.extend(self.detector.evaluate_event(ev))
 
         self.event_store.insert_many(normalized_batch)
         self.alerts.extend(new_alerts)
@@ -90,9 +109,9 @@ class SOCCopilot:
         self.audit.append(
             "ingest_processed",
             transport=transport,
-            accepted=len(batch.accepted),
+            accepted=len(normalized_batch),
             duplicates=batch.duplicates,
-            rejected=len(batch.rejected),
+            rejected=len(rejected),
             new_alerts=len(new_alerts),
             active_incidents=len(correlated),
             latency_ms=elapsed_ms,
@@ -103,9 +122,9 @@ class SOCCopilot:
                 self.triage_engine.triage_incident(inc, use_llm=False)
 
         return {
-            "accepted": len(batch.accepted),
+            "accepted": len(normalized_batch),
             "duplicates": batch.duplicates,
-            "rejected": batch.rejected,
+            "rejected": rejected,
             "new_alerts": len(new_alerts),
             "incidents": len(correlated),
             "latency_ms": elapsed_ms,

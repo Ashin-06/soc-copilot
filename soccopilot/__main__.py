@@ -13,7 +13,7 @@ import sys
 from pathlib import Path
 
 from .evaluate import run_evaluation, seed_demo_copilot
-from .normalize import normalize_envelope
+from .pipeline import SOCCopilot
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -66,21 +66,15 @@ def main(argv: list[str] | None = None) -> None:
             Path(args.json).write_text(json.dumps(res, indent=2, ensure_ascii=False), encoding="utf-8")
 
     elif args.cmd == "ingest":
-        cp = seed_demo_copilot()
-        cp.reset()
-        batch = cp.ingest_service.ingest_file(args.file, source=args.source)
-        events = []
-        for idx, env in enumerate(batch.accepted, start=1):
-            ev = cp.enricher.enrich(normalize_envelope(env, seq=idx))
-            events.append(ev)
-            cp.alerts.extend(cp.detector.evaluate_event(ev))
-        cp.event_store.insert_many(events)
-        incs = cp.correlator.correlate(cp.alerts, events)
+        cp = SOCCopilot()
+        res = cp.process_file(args.file, source=args.source)
         print(
-            f"Accepted: {len(batch.accepted)} · Duplicates: {batch.duplicates} · "
-            f"Rejected: {len(batch.rejected)} · Alerts: {len(cp.alerts)} · Incidents: {len(incs)}"
+            f"Accepted: {res['accepted']} · Duplicates: {res['duplicates']} · "
+            f"Rejected: {len(res['rejected'])} · Alerts: {res['new_alerts']} · Incidents: {res['incidents']}"
         )
-        for inc in incs:
+        for r in res["rejected"][:20]:
+            print(f"  rejected {r}")
+        for inc in sorted(cp.incidents.values(), key=lambda i: -i.risk_score):
             print(f"  {inc.incident_id} [{inc.severity.upper()} {inc.risk_score}] {inc.title}")
 
     elif args.cmd == "triage":
