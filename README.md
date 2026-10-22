@@ -80,7 +80,7 @@ python -m soccopilot evaluate --labelled my_events.jsonl --json results.json
 
 ```bash
 pip install -r requirements.txt
-python -m pytest -q                      # 47 tests
+python -m pytest -q                      # 48 tests
 python -m soccopilot evaluate            # built-in benchmark
 python -m soccopilot triage              # report and containment proposals for the top incident (--live uses Claude)
 python -m soccopilot ingest events.jsonl # run a file through the whole pipeline
@@ -137,6 +137,7 @@ policy.toml
 
 ## Limits
 
+- **The demo has no live feed.** A few minutes after start-up, `/health` reports the sources as silent. That is the alarm working: silence is measured as wall-clock time since a source last delivered anything.
 - **Connectors are simulated.** `ConnectorSuite` records what it would do. Wire it to your firewall, IdP, core banking and cloud IAM APIs before relying on it.
 - **One process.** State is guarded by a single lock, and every batch re-correlates all alerts. That is fine for a team's daily volume, not for a whole SIEM firehose. At that scale, window correlation by time and move the case store to Postgres.
 - **The Streamlit console has no login.** Run it behind your SSO proxy, or use the web console with API keys.

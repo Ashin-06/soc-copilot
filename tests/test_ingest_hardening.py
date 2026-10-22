@@ -53,3 +53,17 @@ def test_dedupe_memory_is_bounded_by_the_window():
         assert v.check_and_mark_dedup(f"h{i}", BASE_TS + i)
     assert len(v.seen_hashes) < 5_000
     assert not v.check_and_mark_dedup("h9999", BASE_TS + 9999)  # recent ones are still caught
+
+
+def test_an_outage_of_every_source_still_alarms():
+    import time
+
+    from soccopilot.ingest import SourceHealthMonitor
+
+    mon = SourceHealthMonitor()
+    for src in ("auth", "payments"):
+        mon.record_accepted(src, BASE_TS, now=time.time() - 3600)  # last delivery an hour ago
+    health = mon.check_health()
+    assert health["auth"]["status"] == "silent" and health["payments"]["status"] == "silent"
+    # replay mode measures in event time
+    assert mon.check_health(reference_ts=BASE_TS + 10)["auth"]["status"] == "healthy"

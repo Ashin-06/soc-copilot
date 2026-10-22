@@ -111,11 +111,12 @@ class SourceHealthMonitor:
         st.events_rejected += 1
 
     def check_health(self, reference_ts: float | None = None) -> dict[str, dict]:
-        """Evaluate all monitored sources against their silence thresholds."""
-        if reference_ts is None:
-            observed = [s.last_event_ts for s in self.sources.values() if s.last_event_ts is not None]
-            reference_ts = max(observed) if observed else time.time()
+        """Evaluate all monitored sources against their silence thresholds.
 
+        Live, silence is the wall-clock time since a source last delivered anything, so an outage
+        of every source at once still alarms. Pass `reference_ts` to measure in event time
+        instead, e.g. when replaying historical logs."""
+        now = time.time()
         report: dict[str, dict] = {}
         for src, st in self.sources.items():
             if st.last_event_ts is None:
@@ -123,7 +124,10 @@ class SourceHealthMonitor:
                 silence_s = -1.0
                 msg = f"Source '{src}' has not delivered any events yet."
             else:
-                silence_s = max(0.0, reference_ts - st.last_event_ts)
+                if reference_ts is not None:
+                    silence_s = max(0.0, reference_ts - st.last_event_ts)
+                else:
+                    silence_s = max(0.0, now - (st.last_ingested_at or now))
                 if silence_s > st.silence_threshold_s:
                     status = "silent"
                     msg = (
