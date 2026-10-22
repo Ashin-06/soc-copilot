@@ -47,18 +47,34 @@
   .mono { font:12px/1.45 ui-monospace,Consolas,monospace; }
   .entity-chip { display:inline-block; margin:2px 4px 2px 0; padding:2px 7px; border-radius:5px; font:11.5px ui-monospace,Consolas,monospace; background:var(--chip); border:1px solid var(--line); }
   #audit-list { max-height:240px; overflow-y:auto; }
+  input[type=password] { padding:6px 10px; border-radius:7px; border:1px solid var(--line); background:var(--bg); color:var(--ink); font:inherit; width:170px; }
+  #msg { display:none; margin:10px 14px 0; padding:9px 12px; border-radius:8px; border:1px solid var(--bad); background:rgba(248,81,73,.12); }
+  #msg.info { border-color:var(--accent); background:rgba(56,139,253,.12); }
+  dialog { background:var(--card); color:var(--ink); border:1px solid var(--line); border-radius:10px; padding:18px; max-width:min(760px, 94vw); }
+  dialog::backdrop { background:rgba(0,0,0,.5); }
+  dialog table { border-collapse:collapse; width:100%; font-size:12.5px; }
+  dialog td, dialog th { padding:4px 8px; border-bottom:1px solid var(--line); text-align:left; }
 </style>
 </head>
 <body>
 <header>
   <h1>
     <span>SOC Copilot · Digital Bank</span>
-    <span class="pill ok" id="health-pill">6 Sources Active</span>
-    <span class="pill ok" id="chain-pill">Audit Chain Intact</span>
+    <span class="pill" id="health-pill">…</span>
+    <span class="pill" id="chain-pill">…</span>
+    <span class="pill" id="auth-pill">…</span>
   </h1>
+  <input type="password" id="api-key" placeholder="API key" autocomplete="off" aria-label="API key">
+  <button class="secondary" id="btn-key">Use key</button>
   <button class="secondary" id="btn-eval">Run Benchmark</button>
   <button class="secondary" id="btn-reset">Reset Demo</button>
 </header>
+<div id="msg" role="status"></div>
+<dialog id="eval-dialog">
+  <h2 style="margin-top:0;font-size:15px">Benchmark: built-in labelled campaigns</h2>
+  <div id="eval-body">Running…</div>
+  <form method="dialog" style="margin-top:12px;text-align:right"><button>Close</button></form>
+</dialog>
 <main>
   <!-- Left Column: Incident Queue & Source Health -->
   <div>
@@ -81,8 +97,8 @@
 
     <section class="card">
       <h2>
-        <span>AI Triage Report (Privacy-Scrubbed via Project 10 Gateway)</span>
-        <span id="cite-badge" class="pill ok">100% Cited</span>
+        <span>AI Triage Report (customer data masked before the model)</span>
+        <span id="cite-badge" class="pill"></span>
       </h2>
       <div id="report-box"></div>
     </section>
@@ -137,17 +153,49 @@ const inr = (n) => "₹" + Number(n || 0).toLocaleString("en-IN");
 const highlightCitations = (text) => esc(text).replace(/\[(EVT-[A-Za-z0-9_-]+)\]/g, '<span class="cite">[$1]</span>');
 
 let currentId = null;
+let apiKey = "";
+try { apiKey = sessionStorage.getItem("soc-api-key") || ""; } catch (e) { /* storage blocked: key lasts for this page only */ }
+
+let msgTimer = null;
+function say(text, kind = "error") {
+  clearTimeout(msgTimer);
+  $("msg").textContent = text;
+  $("msg").className = kind === "info" ? "info" : "";
+  $("msg").style.display = text ? "block" : "none";
+  if (text && kind === "info") msgTimer = setTimeout(() => say(""), 6000);
+}
+
+// Every call carries the analyst's key; the server decides who they are and what they may do.
+async function api(path, options = {}) {
+  const headers = { ...(options.headers || {}) };
+  if (apiKey) headers["x-api-key"] = apiKey;
+  if (options.body) headers["Content-Type"] = "application/json";
+  const r = await fetch(path, { ...options, headers });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) {
+    const detail = typeof data.detail === "string" ? data.detail : r.statusText;
+    throw new Error(r.status === 401 ? "Enter a valid API key to continue." : detail);
+  }
+  return data;
+}
 
 async function loadQueue() {
-  const [incRes, healthRes, auditRes, actRes] = await Promise.all([
-    fetch("/incidents").then(r => r.json()),
-    fetch("/health").then(r => r.json()),
-    fetch("/audit?limit=40").then(r => r.json()),
-    fetch("/actions").then(r => r.json()),
-  ]);
+  let incRes, healthRes, auditRes, actRes;
+  try {
+    [incRes, healthRes, auditRes, actRes] = await Promise.all([
+      api("/incidents"), api("/health"), api("/audit?limit=40"), api("/actions"),
+    ]);
+  } catch (e) {
+    say(e.message);
+    return;
+  }
+  if ($("msg").className !== "info") say("");
 
+  $("auth-pill").textContent = healthRes.auth.startsWith("demo") ? "Demo mode · no keys" : "Signed in with API key";
+  $("auth-pill").className = "pill " + (healthRes.auth.startsWith("demo") ? "high" : "ok");
   $("inc-count").textContent = `${incRes.count} incidents`;
   $("health-pill").textContent = `${healthRes.events_stored} Events · ${Object.keys(healthRes.sources).length} Sources`;
+  $("health-pill").className = "pill " + (healthRes.status === "healthy" ? "ok" : "high");
   $("chain-pill").textContent = auditRes.verified ? `Audit: ${auditRes.message}` : `Audit BROKEN: ${auditRes.message}`;
   $("chain-pill").className = "pill " + (auditRes.verified ? "ok" : "critical");
 
@@ -200,7 +248,13 @@ async function loadQueue() {
 
 async function loadIncident(id) {
   currentId = id;
-  const data = await fetch(`/incidents/${id}`).then(r => r.json());
+  let data;
+  try {
+    data = await api(`/incidents/${encodeURIComponent(id)}`);
+  } catch (e) {
+    say(e.message);
+    return;
+  }
   const inc = data.incident;
   const rep = data.report;
   const actions = data.actions;
@@ -222,8 +276,11 @@ async function loadIncident(id) {
     <div>${inc.entities.map(e => `<span class="entity-chip">${esc(e)}</span>`).join("")}</div>
   `;
 
-  $("cite-badge").textContent = `${Math.round((rep.citation_coverage || 1) * 100)}% Evidence Cited · Confidence: ${rep.confidence.toUpperCase()}`;
+  const coverage = Math.round((rep.citation_coverage ?? 0) * 100);
+  $("cite-badge").textContent = `${coverage}% Evidence Cited · Confidence: ${String(rep.confidence || "").toUpperCase()}`;
+  $("cite-badge").className = "pill " + (coverage === 100 ? "ok" : "high");
   const maskedStr = Object.entries(rep.privacy_masked_counts || {}).map(([k, v]) => `${k}×${v}`).join(", ") || "none";
+  const rejected = rep.rejected_recommendations || [];
   $("report-box").innerHTML = `
     <p style="margin:0 0 10px">${highlightCitations(rep.summary)}</p>
     <div style="margin-bottom:8px"><b>Likely Impact:</b><ul style="margin:4px 0;padding-left:18px">
@@ -232,7 +289,9 @@ async function loadIncident(id) {
     <div style="margin-bottom:8px"><b>MITRE ATT&amp;CK Mapping:</b><ul style="margin:4px 0;padding-left:18px">
       ${(rep.attack_mapping || []).map(m => `<li><b>${esc(m.tactic)} (${esc(m.technique)})</b>: ${highlightCitations(m.evidence)}</li>`).join("")}
     </ul></div>
-    <div class="meta mono">Privacy Gateway Masked Before LLM: <b>${esc(maskedStr)}</b> · Mode: ${esc(rep.generated_by)}</div>
+    <div class="meta mono">Masked before the model: <b>${esc(maskedStr)}</b> · Masker: ${esc(rep.privacy_mode || "")} · Report: ${esc(rep.generated_by)}</div>
+    ${rep.fallback_reason ? `<div class="meta">Template report used: ${esc(rep.fallback_reason)}</div>` : ''}
+    ${rejected.length ? `<div class="meta" style="color:var(--warn)">${rejected.length} suggested action(s) refused: ${esc(rejected.map(r => `${r.action_type} → ${r.target} (${r.reason})`).join("; "))}</div>` : ''}
   `;
 
   $("timeline-box").innerHTML = (inc.timeline || []).map(t => `
@@ -258,10 +317,10 @@ async function loadIncident(id) {
     <div class="action-box">
       <div style="display:flex;justify-content:space-between;align-items:center">
         <span class="mono"><b>${esc(a.action_type)}</b> → ${esc(a.target)}</span>
-        <span class="pill ${a.status === 'executed' ? 'ok' : a.status === 'declined' ? 'critical' : 'high'}">${esc(a.status)}</span>
+        <span class="pill ${a.status === 'executed' ? 'ok' : ['declined', 'failed', 'expired'].includes(a.status) ? 'critical' : 'high'}">${esc(a.status)}</span>
       </div>
       <div style="font-size:12.5px;margin:5px 0">${highlightCitations(a.rationale)}</div>
-      <div class="meta mono">Connector: ${esc(a.connector)} · SHA256: ${esc(a.digest.slice(0, 12))}…</div>
+      <div class="meta mono">Connector: ${esc(a.connector)} · Proposed by ${esc(a.proposed_by)}${a.decided_by ? ` · Decided by ${esc(a.decided_by)}` : ''} · SHA256: ${esc(a.digest.slice(0, 12))}…</div>
       ${a.status === 'pending' ? `
         <div style="margin-top:8px;display:flex;gap:8px">
           <button class="approve" data-act="${esc(a.action_id)}" data-ok="1">Approve &amp; Execute</button>
@@ -282,11 +341,16 @@ $("inc-list").addEventListener("click", (ev) => {
 $("actions-box").addEventListener("click", async (ev) => {
   const b = ev.target.closest("button[data-act]");
   if (!b) return;
-  await fetch(`/actions/${b.dataset.act}/decide`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ approve: b.dataset.ok === "1", analyst: "soc.lead" }),
-  });
+  b.disabled = true;
+  try {
+    const a = await api(`/actions/${encodeURIComponent(b.dataset.act)}/decide`, {
+      method: "POST",
+      body: JSON.stringify({ approve: b.dataset.ok === "1" }),
+    });
+    say(`${a.action_type} → ${a.target}: ${a.status}`, "info");
+  } catch (e) {
+    say(e.message);
+  }
   await loadQueue();
 });
 
@@ -294,32 +358,58 @@ $("btn-feedback").addEventListener("click", async () => {
   if (!currentId) return;
   const verdict = $("fb-verdict").value;
   const reason = $("fb-reason").value.trim() || "Analyst reviewed evidence";
-  const r = await fetch(`/incidents/${currentId}/feedback`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ verdict, reason, analyst: "soc.lead" }),
-  }).then(x => x.json());
-  $("fb-status").textContent = `Recorded ${verdict}: new score ${r.new_risk_score}`;
-  $("fb-reason").value = "";
+  try {
+    const r = await api(`/incidents/${encodeURIComponent(currentId)}/feedback`, {
+      method: "POST",
+      body: JSON.stringify({ verdict, reason }),
+    });
+    $("fb-status").textContent = `Recorded ${verdict} as ${r.feedback.analyst}: new score ${r.new_risk_score}`;
+    $("fb-reason").value = "";
+  } catch (e) {
+    $("fb-status").textContent = e.message;
+  }
   await loadQueue();
 });
 
 $("btn-eval").addEventListener("click", async () => {
-  const res = await fetch("/evaluate").then(r => r.json());
-  alert(
-    `Benchmark Results:\n` +
-    `• Detection Recall: ${(res.detection_recall * 100).toFixed(0)}% (${res.campaigns_detected}/${res.campaigns_total} campaigns)\n` +
-    `• Security + Fraud Join Rate: ${(res.security_fraud_join_rate * 100).toFixed(0)}%\n` +
-    `• False Positive Incidents/Day: ${res.false_positive_incidents_per_day}\n` +
-    `• Mean Time to First Alert: ${res.mean_time_to_first_alert_ms} ms\n` +
-    `• Report Citation Coverage: ${(res.report_citation_coverage * 100).toFixed(0)}%`
-  );
+  $("eval-body").textContent = "Running… (the first run takes a few seconds; later ones are cached)";
+  $("eval-dialog").showModal();
+  try {
+    const res = await api("/evaluate");
+    const pct = (x) => `${Math.round(x * 100)}%`;
+    $("eval-body").innerHTML = `
+      <p>Detection recall <b>${pct(res.detection_recall)}</b> (${res.campaigns_detected}/${res.campaigns_total}) ·
+         Security + fraud joined <b>${pct(res.security_fraud_join_rate)}</b> ·
+         False-positive incidents on ${res.benign_events_tested} benign events <b>${res.false_positive_incidents_per_day}</b> ·
+         Batch latency <b>${Math.round(res.mean_batch_latency_ms)} ms</b> mean ·
+         Report citations <b>${pct(res.report_citation_coverage)}</b></p>
+      <table><tr><th>Campaign</th><th>Result</th><th>Incident</th><th>Score</th><th>Events</th></tr>
+      ${res.campaigns.map(c => `<tr><td>${esc(c.title)}</td><td>${c.detected ? "detected" : "missed"}</td>
+        <td class="mono">${esc(c.incident_id || "")}</td><td>${c.risk_score}</td><td>${esc(c.events_correlated)}</td></tr>`).join("")}
+      </table>
+      <p class="meta">The rules were tuned on these campaigns, so treat this as a regression check, not real-world recall.
+         Score your own data with <span class="mono">python -m soccopilot evaluate --labelled events.jsonl</span>.</p>`;
+  } catch (e) {
+    $("eval-body").textContent = e.message;
+  }
 });
 
 $("btn-reset").addEventListener("click", async () => {
-  await fetch("/reset", { method: "POST" });
-  currentId = null;
+  if (!confirm("Reset the demo and reload the sample campaigns?")) return;
+  try {
+    await api("/reset", { method: "POST" });
+    currentId = null;
+  } catch (e) {
+    say(e.message);
+  }
   await loadQueue();
+});
+
+$("api-key").value = apiKey;
+$("btn-key").addEventListener("click", () => {
+  apiKey = $("api-key").value.trim();
+  try { sessionStorage.setItem("soc-api-key", apiKey); } catch (e) { /* keep it in memory only */ }
+  loadQueue();
 });
 
 loadQueue();
