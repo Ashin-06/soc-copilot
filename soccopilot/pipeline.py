@@ -13,9 +13,9 @@ from .detect import Alert, DetectionEngine
 from .enrich import Enricher
 from .ingest import IngestBatchResult, IngestService
 from .normalize import NormalizedEvent, normalize_envelope
-from .playbooks import PlaybookEngine
+from .playbooks import PendingAction, PlaybookEngine
 from .store import EventStore, StateStore
-from .triage import MODEL, PrivacyBridge, TriageEngine
+from .triage import MODEL, PrivacyBridge, TriageEngine, TriageReport
 
 DEFAULT_POLICY = Path(__file__).resolve().parent.parent / "policy.toml"
 
@@ -116,6 +116,44 @@ class SOCCopilot:
         self.alerts.clear()
         self.incidents.clear()
         self.audit.append("system_reset")
+
+    # Analyst actions. The API and the Streamlit console both go through these, so a verdict or
+    # approval is saved and audited the same way whichever screen it came from.
+
+    def triage(self, incident_id: str, use_llm: bool = False, client: Any = None) -> TriageReport:
+        inc = self.incidents[incident_id]
+        report = self.triage_engine.triage_incident(inc, client=client, use_llm=use_llm)
+        if inc.status == "open":
+            inc.status = "triaged"
+        self.state_store.save_incident(inc)
+        return report
+
+    def record_feedback(self, incident_id: str, verdict: str, reason: str, analyst: str) -> dict[str, Any]:
+        inc = self.incidents[incident_id]
+        fb = self.correlator.record_feedback(inc, verdict, reason, analyst)
+        self.state_store.save_incident(inc)
+        self.state_store.save_feedback(incident_id, verdict, reason, analyst, time.time(), fb)
+        self.audit.append(
+            "analyst_feedback",
+            incident_id=incident_id,
+            verdict=verdict,
+            reason=reason,
+            analyst=analyst,
+            updated_rule_weights=fb["updated_rule_weights"],
+        )
+        return fb
+
+    def decide_action(self, action_id: str, approve: bool, analyst: str) -> PendingAction:
+        act = self.playbooks.decide_and_run(action_id, approve=approve, analyst=analyst)
+        inc = self.incidents.get(act.incident_id)
+        if inc is not None and act.status == "executed":
+            # telling the customer is not containment; anything else that ran is
+            if act.action_type != "notify_customer":
+                inc.status = "contained"
+            elif inc.status == "open":
+                inc.status = "triaged"
+            self.state_store.save_incident(inc)
+        return act
 
     def _claim_event_id(self, ev: NormalizedEvent, taken: set[str]) -> None:
         """Event IDs are evidence references: a reused source ID gets a hash suffix instead of
