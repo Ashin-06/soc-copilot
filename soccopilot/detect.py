@@ -4,11 +4,13 @@ baselines, and payment-system fraud signal detectors.
 from __future__ import annotations
 
 import datetime as dt
+import operator
 import re
 from collections import defaultdict
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import yaml
 
@@ -57,15 +59,53 @@ class Alert:
         return asdict(self)
 
 
-def _parse_timeframe(tf: str | None) -> float:
-    if not tf:
-        return 300.0
+SEVERITIES = ("low", "medium", "high", "critical")
+MODIFIERS = {None, "in", "contains", "startswith", "endswith", "re", "gte", "gt", "lte", "lt"}
+EVENT_FIELDS = set(NormalizedEvent.__dataclass_fields__) | {"actor"}
+CONDITION = re.compile(
+    r"^selection(?P<filter> and not filter)?"
+    r"(?: ?\| ?count\(\) by (?P<by>[A-Za-z0-9_.]+) ?(?P<op>>=|>|==) ?(?P<n>\d+))?$"
+)
+OPS = {">=": operator.ge, ">": operator.gt, "==": operator.eq}
+MAX_WINDOW_EVENTS = 500  # per rule and group; enough evidence for a report, bounded under a flood
+
+
+class RuleError(ValueError):
+    """A rule file uses syntax this engine does not support. Raised at load time so a typo
+    cannot silently turn a rule into one that never fires."""
+
+
+def _parse_timeframe(tf: Any) -> float:
     m = re.match(r"^\s*(\d+)\s*([smhd])\s*$", str(tf).lower())
-    if not m:
-        return 300.0
-    val = int(m.group(1))
-    unit = m.group(2)
-    return float(val * {"s": 1, "m": 60, "h": 3600, "d": 86400}[unit])
+    if not m or int(m.group(1)) == 0:
+        raise RuleError(f"unsupported timeframe {tf!r} (use e.g. 30s, 5m, 2h, 1d)")
+    return float(int(m.group(1)) * {"s": 1, "m": 60, "h": 3600, "d": 86400}[m.group(2)])
+
+
+def _check_field(path: str) -> None:
+    head = path.split(".", 1)[0]
+    if head not in EVENT_FIELDS:
+        raise RuleError(f"unknown field {path!r}")
+    if "." in path and head not in ("enrichment", "details"):
+        raise RuleError(f"only enrichment.* and details.* can be nested, got {path!r}")
+
+
+def _compile_block(block: Any, name: str) -> list[tuple[str, str | None, Any]]:
+    if not isinstance(block, dict) or not block:
+        raise RuleError(f"detection.{name} must be a non-empty mapping")
+    out: list[tuple[str, str | None, Any]] = []
+    for raw_key, expected in block.items():
+        path, _, mod = str(raw_key).partition("|")
+        if (mod or None) not in MODIFIERS:
+            raise RuleError(f"unsupported modifier {mod!r} in {raw_key!r}")
+        _check_field(path)
+        if mod == "re":
+            try:
+                expected = re.compile(str(expected))
+            except re.error as e:
+                raise RuleError(f"bad regex in {raw_key!r}: {e}") from e
+        out.append((path, mod or None, expected))
+    return out
 
 
 def _get_field(ev: NormalizedEvent, field_path: str) -> Any:
@@ -102,7 +142,7 @@ def _match_value(actual: Any, expected: Any, modifier: str | None) -> bool:
         targets = expected if isinstance(expected, list) else [expected]
         return any(str(actual).lower().endswith(str(t).lower()) for t in targets)
     if modifier == "re":
-        return bool(re.search(str(expected), str(actual)))
+        return bool(expected.search(str(actual)))
     try:
         a_num = float(actual)
         e_num = float(expected)
@@ -119,16 +159,8 @@ def _match_value(actual: Any, expected: Any, modifier: str | None) -> bool:
     return False
 
 
-def _match_block(ev: NormalizedEvent, block: dict[str, Any]) -> bool:
-    for raw_key, expected in block.items():
-        if "|" in raw_key:
-            field_path, modifier = raw_key.split("|", 1)
-        else:
-            field_path, modifier = raw_key, None
-        actual = _get_field(ev, field_path)
-        if not _match_value(actual, expected, modifier):
-            return False
-    return True
+def _match_block(ev: NormalizedEvent, block: list[tuple[str, str | None, Any]]) -> bool:
+    return all(_match_value(_get_field(ev, path), expected, mod) for path, mod, expected in block)
 
 
 @dataclass
@@ -141,8 +173,8 @@ class SigmaRule:
     tactics: list[str]
     techniques: list[str]
     domain: str
-    selection: dict[str, Any]
-    filter_block: dict[str, Any] | None
+    selection: list[tuple[str, str | None, Any]]
+    filter_block: list[tuple[str, str | None, Any]] | None
     timeframe_s: float | None
     agg_group_by: str | None
     agg_op: str | None
@@ -150,6 +182,11 @@ class SigmaRule:
 
     @classmethod
     def from_yaml(cls, data: dict[str, Any]) -> "SigmaRule":
+        if not isinstance(data, dict) or not data.get("id"):
+            raise RuleError("a rule must be a mapping with an id")
+        level = str(data.get("level", "medium")).lower()
+        if level not in SEVERITIES:
+            raise RuleError(f"unsupported level {level!r}")
         tags = [str(t).lower() for t in data.get("tags", [])]
         tactics: list[str] = []
         techniques: list[str] = []
@@ -162,38 +199,35 @@ class SigmaRule:
                 if tac in TACTIC_ORDER and tac not in tactics:
                     tactics.append(tac)
 
-        det = data.get("detection", {})
-        selection = det.get("selection", {})
-        filter_block = det.get("filter")
-        cond = str(det.get("condition", "selection"))
-        tf = _parse_timeframe(det["timeframe"]) if "timeframe" in det else None
-
-        agg_group_by = None
-        agg_op = None
-        agg_threshold = None
-        if "|" in cond:
-            _, pipe_part = cond.split("|", 1)
-            m = re.search(r"count\(\)\s+by\s+([a-zA-Z0-9_.]+)\s*(>=|>|==)\s*(\d+)", pipe_part.strip())
-            if m:
-                agg_group_by = m.group(1)
-                agg_op = m.group(2)
-                agg_threshold = int(m.group(3))
+        det = data.get("detection")
+        if not isinstance(det, dict):
+            raise RuleError("missing detection block")
+        cond = " ".join(str(det.get("condition", "selection")).split())
+        m = CONDITION.match(cond)
+        if not m:
+            raise RuleError(f"unsupported condition {cond!r}; expected 'selection [and not filter] [| count() by FIELD >= N]'")
+        if bool(m["filter"]) != ("filter" in det):
+            raise RuleError("the condition and the filter block disagree")
+        if bool(m["by"]) != ("timeframe" in det):
+            raise RuleError("count() aggregation and timeframe must be used together")
+        if m["by"]:
+            _check_field(m["by"])
 
         return cls(
-            id=str(data.get("id", "SIGMA-UNKNOWN")),
+            id=str(data["id"]),
             title=str(data.get("title", "Unnamed Sigma Rule")),
             description=str(data.get("description", "")),
-            level=str(data.get("level", "medium")).lower(),
+            level=level,
             tags=tags,
             tactics=tactics or ["discovery"],
             techniques=techniques or ["T1078"],
             domain=domain,
-            selection=selection,
-            filter_block=filter_block,
-            timeframe_s=tf,
-            agg_group_by=agg_group_by,
-            agg_op=agg_op,
-            agg_threshold=agg_threshold,
+            selection=_compile_block(det.get("selection"), "selection"),
+            filter_block=_compile_block(det["filter"], "filter") if m["filter"] else None,
+            timeframe_s=_parse_timeframe(det["timeframe"]) if m["by"] else None,
+            agg_group_by=m["by"],
+            agg_op=m["op"],
+            agg_threshold=int(m["n"]) if m["n"] else None,
         )
 
     def matches_event(self, ev: NormalizedEvent) -> bool:
@@ -212,11 +246,11 @@ class BehaviorBaseline:
     def __init__(self, egress_limit_bytes: int = 50_000_000):
         self.egress_limit_bytes = egress_limit_bytes
 
-    def evaluate(self, ev: NormalizedEvent, seq: int) -> list[Alert]:
+    def evaluate(self, ev: NormalizedEvent) -> list[Alert]:
         alerts: list[Alert] = []
         crit = int(ev.enrichment.get("asset_criticality", 2))
 
-        # 1. Off-hours staff authentication baseline
+        # 1. Off-hours staff authentication baseline (usual hours are local to the staff member)
         usual_hours = ev.enrichment.get("staff_usual_hours")
         if (
             ev.event_category == "authentication"
@@ -227,11 +261,16 @@ class BehaviorBaseline:
         ):
             start_h, end_h = int(usual_hours[0]), int(usual_hours[1])
             if not (start_h == 0 and end_h == 24):
-                hour = dt.datetime.fromtimestamp(ev.timestamp, tz=dt.timezone.utc).hour
+                tz_name = str(ev.enrichment.get("staff_timezone") or "UTC")
+                try:
+                    tz = ZoneInfo(tz_name)
+                except (ZoneInfoNotFoundError, ValueError):
+                    tz, tz_name = dt.timezone.utc, "UTC"
+                hour = dt.datetime.fromtimestamp(ev.timestamp, tz=tz).hour
                 if hour < start_h or hour >= end_h:
                     alerts.append(
                         Alert(
-                            alert_id=f"ALT-BL-{seq:04d}-A",
+                            alert_id=f"ALT-{ev.event_id}-BASELINE-OFFHOURS-001",
                             rule_id="BASELINE-OFFHOURS-001",
                             title="Anomalous Off-Hours Staff Login",
                             severity="medium",
@@ -245,7 +284,7 @@ class BehaviorBaseline:
                             asset_criticality=crit,
                             user=ev.user,
                             source_ip=ev.source_ip,
-                            summary=f"Staff user {ev.user} logged in at {hour:02d}:00 UTC outside usual window {start_h:02d}:00-{end_h:02d}:00.",
+                            summary=f"Staff user {ev.user} logged in at {hour:02d}:00 {tz_name} outside usual window {start_h:02d}:00-{end_h:02d}:00.",
                         )
                     )
 
@@ -256,7 +295,7 @@ class BehaviorBaseline:
             cur_c = ev.enrichment.get("geo_country", "UNKNOWN")
             alerts.append(
                 Alert(
-                    alert_id=f"ALT-BL-{seq:04d}-B",
+                    alert_id=f"ALT-{ev.event_id}-BASELINE-GEO-002",
                     rule_id="BASELINE-GEO-002",
                     title="Impossible Geographic Travel Detected",
                     severity="high",
@@ -280,7 +319,7 @@ class BehaviorBaseline:
             mb = ev.bytes_out / (1024 * 1024)
             alerts.append(
                 Alert(
-                    alert_id=f"ALT-BL-{seq:04d}-C",
+                    alert_id=f"ALT-{ev.event_id}-BASELINE-EGRESS-003",
                     rule_id="BASELINE-EGRESS-003",
                     title="Anomalous Bulk Data Egress Volume",
                     severity="critical",
@@ -306,7 +345,7 @@ class BehaviorBaseline:
             ):
                 alerts.append(
                     Alert(
-                        alert_id=f"ALT-FRD-{seq:04d}-A",
+                        alert_id=f"ALT-{ev.event_id}-FRAUD-ATO-DEVICE-001",
                         rule_id="FRAUD-ATO-DEVICE-001",
                         title="Suspicious Device or Phone Change from High-Risk Network",
                         severity="high",
@@ -335,7 +374,7 @@ class BehaviorBaseline:
             ):
                 alerts.append(
                     Alert(
-                        alert_id=f"ALT-FRD-{seq:04d}-B",
+                        alert_id=f"ALT-{ev.event_id}-FRAUD-DRAIN-002",
                         rule_id="FRAUD-DRAIN-002",
                         title="Anomalous High-Ratio Outbound Transfer After Account Modification",
                         severity="critical",
@@ -368,27 +407,40 @@ class DetectionEngine:
         self.rules_dir = Path(rules_dir)
         self.rules: list[SigmaRule] = self._load_rules()
         self.baseline = BehaviorBaseline()
+        self._timeframes = {r.id: r.timeframe_s for r in self.rules if r.timeframe_s}
         self._window_buffers: dict[tuple[str, str], list[NormalizedEvent]] = defaultdict(list)
         self._window_fired: set[tuple[str, str, int]] = set()
-        self._seq = 0
+        self._evaluated = 0
 
     def _load_rules(self) -> list[SigmaRule]:
         loaded: list[SigmaRule] = []
         if not self.rules_dir.exists():
-            return loaded
+            raise RuleError(f"rules directory {self.rules_dir} does not exist")
         for p in sorted(self.rules_dir.glob("*.yml")):
-            data = yaml.safe_load(p.read_text(encoding="utf-8"))
-            if isinstance(data, dict):
-                loaded.append(SigmaRule.from_yaml(data))
+            try:
+                rule = SigmaRule.from_yaml(yaml.safe_load(p.read_text(encoding="utf-8")))
+            except (RuleError, yaml.YAMLError) as e:
+                raise RuleError(f"{p.name}: {e}") from e
+            if any(r.id == rule.id for r in loaded):
+                raise RuleError(f"{p.name}: duplicate rule id {rule.id}")
+            loaded.append(rule)
         return loaded
 
     def reset(self) -> None:
         self._window_buffers.clear()
         self._window_fired.clear()
-        self._seq = 0
+        self._evaluated = 0
+
+    def _sweep(self, now: float) -> None:
+        """Forget windows that have gone quiet, so per-IP / per-actor state does not grow forever."""
+        for key in [k for k, buf in self._window_buffers.items() if not buf or buf[-1].timestamp < now - self._timeframes[k[0]]]:
+            del self._window_buffers[key]
+        self._window_fired = {k for k in self._window_fired if k[2] >= int(now // self._timeframes[k[0]]) - 1}
 
     def evaluate_event(self, ev: NormalizedEvent) -> list[Alert]:
-        self._seq += 1
+        self._evaluated += 1
+        if self._evaluated % 1000 == 0:
+            self._sweep(ev.timestamp)
         out: list[Alert] = []
         crit = int(ev.enrichment.get("asset_criticality", 2))
 
@@ -396,15 +448,18 @@ class DetectionEngine:
             if not rule.matches_event(ev):
                 continue
 
-            if rule.agg_group_by and rule.agg_threshold and rule.timeframe_s:
-                group_val = str(_get_field(ev, rule.agg_group_by) or "global")
+            if rule.agg_group_by:
+                group = _get_field(ev, rule.agg_group_by)
+                if group is None or group == "":
+                    continue  # pooling events without a key would merge unrelated actors into one count
+                group_val = str(group)
                 key = (rule.id, group_val)
                 buf = self._window_buffers[key]
                 buf.append(ev)
                 cutoff = ev.timestamp - rule.timeframe_s
-                buf[:] = [x for x in buf if x.timestamp >= cutoff]
+                buf[:] = [x for x in buf if x.timestamp >= cutoff][-MAX_WINDOW_EVENTS:]
                 bucket_id = int(ev.timestamp // rule.timeframe_s)
-                if len(buf) >= rule.agg_threshold and (rule.id, group_val, bucket_id) not in self._window_fired:
+                if OPS[rule.agg_op](len(buf), rule.agg_threshold) and (rule.id, group_val, bucket_id) not in self._window_fired:
                     self._window_fired.add((rule.id, group_val, bucket_id))
                     ent_set: list[str] = []
                     for item in buf:
@@ -414,7 +469,7 @@ class DetectionEngine:
                     money = sum(x.amount for x in buf if x.event_category == "payment")
                     out.append(
                         Alert(
-                            alert_id=f"ALT-{self._seq:04d}-{rule.id[-3:]}",
+                            alert_id=f"ALT-{ev.event_id}-{rule.id}",
                             rule_id=rule.id,
                             title=rule.title,
                             severity=rule.level,
@@ -437,7 +492,7 @@ class DetectionEngine:
                 money = ev.amount if ev.event_category == "payment" else 0.0
                 out.append(
                     Alert(
-                        alert_id=f"ALT-{self._seq:04d}-{rule.id[-3:]}",
+                        alert_id=f"ALT-{ev.event_id}-{rule.id}",
                         rule_id=rule.id,
                         title=rule.title,
                         severity=rule.level,
@@ -457,5 +512,5 @@ class DetectionEngine:
                     )
                 )
 
-        out.extend(self.baseline.evaluate(ev, self._seq))
+        out.extend(self.baseline.evaluate(ev))
         return out
