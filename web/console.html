@@ -1,0 +1,328 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SOC Copilot · Digital Bank Analyst Console</title>
+<style>
+  :root {
+    --bg:#0d1117; --card:#161b22; --ink:#e6edf3; --muted:#8b949e; --line:#30363d;
+    --accent:#388bfd; --ok:#2ea043; --warn:#d29922; --bad:#f85149; --crit:#ff7b72;
+    --chip:#21262d; --fraud:#a371f7;
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg:#f4f6f9; --card:#ffffff; --ink:#15181e; --muted:#5c6672; --line:#dde2e8;
+      --accent:#1f6feb; --ok:#1a7f37; --warn:#9a6700; --bad:#cf222e; --crit:#a40e26;
+      --chip:#eef1f5; --fraud:#6e40c9;
+    }
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; font:14px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif; background:var(--bg); color:var(--ink); }
+  header { display:flex; align-items:center; gap:14px; padding:12px 20px; border-bottom:1px solid var(--line); background:var(--card); flex-wrap:wrap; }
+  header h1 { font-size:17px; margin:0; flex:1; display:flex; align-items:center; gap:10px; }
+  .pill { font-size:11px; font-weight:700; padding:2px 8px; border-radius:99px; text-transform:uppercase; letter-spacing:.04em; background:var(--chip); color:var(--muted); }
+  .pill.critical { background:rgba(248,81,73,.18); color:var(--crit); border:1px solid var(--bad); }
+  .pill.high { background:rgba(210,153,34,.18); color:var(--warn); }
+  .pill.medium { background:rgba(56,139,253,.18); color:var(--accent); }
+  .pill.low { background:var(--chip); color:var(--muted); }
+  .pill.joined { background:rgba(163,113,247,.2); color:var(--fraud); border:1px solid var(--fraud); }
+  .pill.ok { background:rgba(46,160,67,.18); color:var(--ok); }
+  main { display:grid; grid-template-columns: 370px minmax(0,1fr) 360px; gap:14px; padding:14px; max-width:1680px; margin:0 auto; }
+  @media (max-width: 1200px) { main { grid-template-columns: 1fr; } }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:14px; margin-bottom:14px; }
+  .card h2 { font-size:12px; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); margin:0 0 10px; display:flex; justify-content:space-between; align-items:center; }
+  .inc-item { padding:11px; border:1px solid var(--line); border-radius:8px; margin-bottom:8px; cursor:pointer; transition:border-color .15s; }
+  .inc-item:hover, .inc-item.active { border-color:var(--accent); background:var(--chip); }
+  .inc-title { font-weight:600; margin:4px 0; font-size:13.5px; }
+  .meta { font-size:12px; color:var(--muted); display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+  button { font:inherit; font-size:13px; font-weight:600; padding:6px 12px; border:0; border-radius:7px; background:var(--accent); color:#fff; cursor:pointer; }
+  button.secondary { background:var(--chip); color:var(--ink); border:1px solid var(--line); }
+  button.approve { background:var(--ok); }
+  button.decline { background:var(--bad); }
+  input[type=text], select { padding:6px 10px; border-radius:7px; border:1px solid var(--line); background:var(--bg); color:var(--ink); font:inherit; }
+  .timeline-item { padding:8px 10px; border-left:3px solid var(--accent); background:var(--chip); border-radius:0 7px 7px 0; margin-bottom:7px; font-size:13px; }
+  .cite { font:11.5px ui-monospace,Consolas,monospace; background:rgba(56,139,253,.16); color:var(--accent); padding:1px 5px; border-radius:4px; }
+  .action-box { border:1px solid var(--line); border-radius:8px; padding:10px; margin-bottom:8px; background:var(--chip); }
+  .mono { font:12px/1.45 ui-monospace,Consolas,monospace; }
+  .entity-chip { display:inline-block; margin:2px 4px 2px 0; padding:2px 7px; border-radius:5px; font:11.5px ui-monospace,Consolas,monospace; background:var(--chip); border:1px solid var(--line); }
+  #audit-list { max-height:240px; overflow-y:auto; }
+</style>
+</head>
+<body>
+<header>
+  <h1>
+    <span>SOC Copilot · Digital Bank</span>
+    <span class="pill ok" id="health-pill">6 Sources Active</span>
+    <span class="pill ok" id="chain-pill">Audit Chain Intact</span>
+  </h1>
+  <button class="secondary" id="btn-eval">Run Benchmark</button>
+  <button class="secondary" id="btn-reset">Reset Demo</button>
+</header>
+<main>
+  <!-- Left Column: Incident Queue & Source Health -->
+  <div>
+    <section class="card">
+      <h2><span>Incident Queue</span><span id="inc-count">0</span></h2>
+      <div id="inc-list"></div>
+    </section>
+    <section class="card">
+      <h2><span>Log Source Health</span></h2>
+      <div id="source-list" class="mono"></div>
+    </section>
+  </div>
+
+  <!-- Middle Column: Selected Incident, AI Triage Report, Storyline Timeline & Entity Graph -->
+  <div>
+    <section class="card" id="inc-header-card">
+      <h2><span>Incident Investigation</span><span id="inc-id-badge" class="mono"></span></h2>
+      <div id="inc-detail">Select an incident from the queue.</div>
+    </section>
+
+    <section class="card">
+      <h2>
+        <span>AI Triage Report (Privacy-Scrubbed via Project 10 Gateway)</span>
+        <span id="cite-badge" class="pill ok">100% Cited</span>
+      </h2>
+      <div id="report-box"></div>
+    </section>
+
+    <section class="card">
+      <h2><span>ATT&amp;CK Storyline Timeline</span></h2>
+      <div id="timeline-box"></div>
+    </section>
+
+    <section class="card">
+      <h2><span>Correlated Entity Graph</span></h2>
+      <div id="graph-box"></div>
+    </section>
+  </div>
+
+  <!-- Right Column: Playbook Approvals, Analyst Feedback & Hash-Chained Audit -->
+  <div>
+    <section class="card">
+      <h2><span>Containment Playbooks (Analyst Approval Required)</span></h2>
+      <div id="actions-box"></div>
+    </section>
+
+    <section class="card">
+      <h2><span>Active Containment State</span></h2>
+      <div id="connectors-box" class="mono" style="font-size:12px"></div>
+    </section>
+
+    <section class="card">
+      <h2><span>Analyst Feedback (Tunes Rule Weights)</span></h2>
+      <div style="display:flex;flex-direction:column;gap:8px">
+        <select id="fb-verdict">
+          <option value="true_positive">True Positive (Confirm &amp; Boost Rules)</option>
+          <option value="false_positive">False Positive (Suppress &amp; Down-weight Rules)</option>
+        </select>
+        <input type="text" id="fb-reason" placeholder="Reason, e.g. Confirmed ATO + wire drain">
+        <button id="btn-feedback">Submit Verdict</button>
+        <div id="fb-status" class="meta"></div>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2><span>Tamper-Evident Audit Trail</span></h2>
+      <div id="audit-list" class="mono"></div>
+    </section>
+  </div>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;" }[c]));
+const inr = (n) => "₹" + Number(n || 0).toLocaleString("en-IN");
+const highlightCitations = (text) => esc(text).replace(/\[(EVT-[A-Za-z0-9_-]+)\]/g, '<span class="cite">[$1]</span>');
+
+let currentId = null;
+
+async function loadQueue() {
+  const [incRes, healthRes, auditRes, actRes] = await Promise.all([
+    fetch("/incidents").then(r => r.json()),
+    fetch("/health").then(r => r.json()),
+    fetch("/audit?limit=40").then(r => r.json()),
+    fetch("/actions").then(r => r.json()),
+  ]);
+
+  $("inc-count").textContent = `${incRes.count} incidents`;
+  $("health-pill").textContent = `${healthRes.events_stored} Events · ${Object.keys(healthRes.sources).length} Sources`;
+  $("chain-pill").textContent = auditRes.verified ? `Audit: ${auditRes.message}` : `Audit BROKEN: ${auditRes.message}`;
+  $("chain-pill").className = "pill " + (auditRes.verified ? "ok" : "critical");
+
+  if (!currentId && incRes.incidents.length) currentId = incRes.incidents[0].incident_id;
+
+  $("inc-list").innerHTML = incRes.incidents.map(inc => `
+    <div class="inc-item ${inc.incident_id === currentId ? 'active' : ''}" data-id="${esc(inc.incident_id)}">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:6px">
+        <span class="mono" style="font-weight:700">${esc(inc.incident_id)}</span>
+        <div style="display:flex;gap:4px">
+          ${inc.security_fraud_joined ? '<span class="pill joined">SEC + FRAUD</span>' : ''}
+          <span class="pill ${esc(inc.severity)}">${esc(inc.severity)} · ${inc.risk_score}</span>
+        </div>
+      </div>
+      <div class="inc-title">${esc(inc.title)}</div>
+      <div class="meta">
+        <span>Tactics: ${esc(inc.tactics.join(" → "))}</span>
+        ${inc.money_at_risk > 0 ? `<span style="color:var(--crit);font-weight:700">At Risk: ${inr(inc.money_at_risk)}</span>` : ''}
+        <span>Status: <b>${esc(inc.status)}</b></span>
+      </div>
+    </div>
+  `).join("");
+
+  $("source-list").innerHTML = Object.values(healthRes.sources).map(s =>
+    `<div style="display:flex;justify-content:space-between;padding:3px 0;border-bottom:1px solid var(--line)">
+      <span>${esc(s.source)}</span>
+      <span>${s.events_accepted} ev · <b style="color:${s.status === 'healthy' ? 'var(--ok)' : 'var(--warn)'}">${esc(s.status)}</b></span>
+    </div>`
+  ).join("");
+
+  const cs = actRes.connector_state;
+  $("connectors-box").innerHTML = `
+    <div>Blocked IPs: <b>${esc(cs.blocked_ips.join(", ") || "none")}</b></div>
+    <div>Frozen Accounts: <b>${esc(cs.frozen_accounts.join(", ") || "none")}</b></div>
+    <div>Revoked Sessions: <b>${esc(cs.revoked_sessions.join(", ") || "none")}</b></div>
+    <div>Disabled Cloud Keys: <b>${esc(cs.disabled_cloud_keys.join(", ") || "none")}</b></div>
+    <div>Password Resets: <b>${esc(cs.password_resets.join(", ") || "none")}</b></div>
+    <div>Customer Alerts Sent: <b>${cs.notified_customers.length}</b></div>
+  `;
+
+  $("audit-list").innerHTML = auditRes.entries.slice().reverse().map(e =>
+    `<div style="padding:4px 0;border-bottom:1px solid var(--line)">
+      #${e.seq} <b>${esc(e.event)}</b> ${esc(e.incident_id || e.action_id || "")}
+      <span style="color:var(--muted)">${esc((e.hash || "").slice(0, 10))}…</span>
+    </div>`
+  ).join("");
+
+  if (currentId) await loadIncident(currentId);
+}
+
+async function loadIncident(id) {
+  currentId = id;
+  const data = await fetch(`/incidents/${id}`).then(r => r.json());
+  const inc = data.incident;
+  const rep = data.report;
+  const actions = data.actions;
+
+  $("inc-id-badge").textContent = `${inc.incident_id} · Score ${inc.risk_score}/100`;
+  const bd = inc.score_breakdown || {};
+  $("inc-detail").innerHTML = `
+    <div style="font-size:16px;font-weight:700;margin-bottom:6px">${esc(inc.title)}</div>
+    <div class="meta" style="margin-bottom:8px">
+      <span class="pill ${esc(inc.severity)}">${esc(inc.severity)}</span>
+      ${inc.security_fraud_joined ? '<span class="pill joined">Security + Fraud Joined</span>' : ''}
+      <span>Status: <b>${esc(inc.status)}</b></span>
+      <span>Money at Risk: <b>${inr(inc.money_at_risk)}</b></span>
+      <span>Asset Criticality: <b>${inc.max_asset_criticality}/5</b></span>
+    </div>
+    <div class="meta mono" style="margin-bottom:8px">
+      Score Breakdown: Severity ${bd.rule_severity ?? 0} + Tactics ${bd.tactic_diversity ?? 0} + Asset ${bd.asset_criticality ?? 0} + Money ${bd.money_at_risk_bonus ?? 0} + Sec×Fraud Bonus ${bd.security_fraud_bonus ?? 0} = <b>${inc.risk_score}</b>
+    </div>
+    <div>${inc.entities.map(e => `<span class="entity-chip">${esc(e)}</span>`).join("")}</div>
+  `;
+
+  $("cite-badge").textContent = `${Math.round((rep.citation_coverage || 1) * 100)}% Evidence Cited · Confidence: ${rep.confidence.toUpperCase()}`;
+  const maskedStr = Object.entries(rep.privacy_masked_counts || {}).map(([k, v]) => `${k}×${v}`).join(", ") || "none";
+  $("report-box").innerHTML = `
+    <p style="margin:0 0 10px">${highlightCitations(rep.summary)}</p>
+    <div style="margin-bottom:8px"><b>Likely Impact:</b><ul style="margin:4px 0;padding-left:18px">
+      ${(rep.likely_impact || []).map(x => `<li>${highlightCitations(x)}</li>`).join("")}
+    </ul></div>
+    <div style="margin-bottom:8px"><b>MITRE ATT&amp;CK Mapping:</b><ul style="margin:4px 0;padding-left:18px">
+      ${(rep.attack_mapping || []).map(m => `<li><b>${esc(m.tactic)} (${esc(m.technique)})</b>: ${highlightCitations(m.evidence)}</li>`).join("")}
+    </ul></div>
+    <div class="meta mono">Privacy Gateway Masked Before LLM: <b>${esc(maskedStr)}</b> · Mode: ${esc(rep.generated_by)}</div>
+  `;
+
+  $("timeline-box").innerHTML = (inc.timeline || []).map(t => `
+    <div class="timeline-item">
+      <div style="display:flex;justify-content:space-between;gap:8px">
+        <span><b>[${esc(t.tactic.toUpperCase())} · ${esc(t.technique)}]</b> ${esc(t.source)}:${esc(t.action)}</span>
+        <span class="cite">[${esc(t.event_id)}]</span>
+      </div>
+      <div>${esc(t.message)} ${t.amount > 0 ? `<b style="color:var(--crit)">(${inr(t.amount)})</b>` : ''}</div>
+      <div class="meta mono">${esc(t.iso_timestamp)} · Actor: ${esc(t.actor)} · Host: ${esc(t.host)}</div>
+    </div>
+  `).join("");
+
+  const g = inc.entity_graph || { nodes: [], edges: [] };
+  $("graph-box").innerHTML = `
+    <div class="meta" style="margin-bottom:6px">${g.nodes.length} nodes · ${g.edges.length} correlation links</div>
+    <div class="mono" style="font-size:12px">
+      ${g.edges.slice(0, 18).map(e => `<div style="padding:2px 0">${esc(e.source)} ──(${esc(e.relation)})──► <b>${esc(e.target)}</b></div>`).join("")}
+    </div>
+  `;
+
+  $("actions-box").innerHTML = actions.length ? actions.map(a => `
+    <div class="action-box">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <span class="mono"><b>${esc(a.action_type)}</b> → ${esc(a.target)}</span>
+        <span class="pill ${a.status === 'executed' ? 'ok' : a.status === 'declined' ? 'critical' : 'high'}">${esc(a.status)}</span>
+      </div>
+      <div style="font-size:12.5px;margin:5px 0">${highlightCitations(a.rationale)}</div>
+      <div class="meta mono">Connector: ${esc(a.connector)} · SHA256: ${esc(a.digest.slice(0, 12))}…</div>
+      ${a.status === 'pending' ? `
+        <div style="margin-top:8px;display:flex;gap:8px">
+          <button class="approve" data-act="${esc(a.action_id)}" data-ok="1">Approve &amp; Execute</button>
+          <button class="decline" data-act="${esc(a.action_id)}" data-ok="0">Decline</button>
+        </div>
+      ` : ''}
+    </div>
+  `).join("") : '<div class="meta">No containment actions queued.</div>';
+}
+
+$("inc-list").addEventListener("click", (ev) => {
+  const card = ev.target.closest(".inc-item[data-id]");
+  if (!card) return;
+  currentId = card.dataset.id;
+  loadQueue();
+});
+
+$("actions-box").addEventListener("click", async (ev) => {
+  const b = ev.target.closest("button[data-act]");
+  if (!b) return;
+  await fetch(`/actions/${b.dataset.act}/decide`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ approve: b.dataset.ok === "1", analyst: "soc.lead" }),
+  });
+  await loadQueue();
+});
+
+$("btn-feedback").addEventListener("click", async () => {
+  if (!currentId) return;
+  const verdict = $("fb-verdict").value;
+  const reason = $("fb-reason").value.trim() || "Analyst reviewed evidence";
+  const r = await fetch(`/incidents/${currentId}/feedback`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ verdict, reason, analyst: "soc.lead" }),
+  }).then(x => x.json());
+  $("fb-status").textContent = `Recorded ${verdict}: new score ${r.new_risk_score}`;
+  $("fb-reason").value = "";
+  await loadQueue();
+});
+
+$("btn-eval").addEventListener("click", async () => {
+  const res = await fetch("/evaluate").then(r => r.json());
+  alert(
+    `Benchmark Results:\n` +
+    `• Detection Recall: ${(res.detection_recall * 100).toFixed(0)}% (${res.campaigns_detected}/${res.campaigns_total} campaigns)\n` +
+    `• Security + Fraud Join Rate: ${(res.security_fraud_join_rate * 100).toFixed(0)}%\n` +
+    `• False Positive Incidents/Day: ${res.false_positive_incidents_per_day}\n` +
+    `• Mean Time to First Alert: ${res.mean_time_to_first_alert_ms} ms\n` +
+    `• Report Citation Coverage: ${(res.report_citation_coverage * 100).toFixed(0)}%`
+  );
+});
+
+$("btn-reset").addEventListener("click", async () => {
+  await fetch("/reset", { method: "POST" });
+  currentId = null;
+  await loadQueue();
+});
+
+loadQueue();
+</script>
+</body>
+</html>
