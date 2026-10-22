@@ -201,8 +201,10 @@ class SOCCopilot:
 
         # Re-correlate active alerts into incidents
         # ponytail: re-correlates every alert on each batch; window by time once alert volume makes this slow
+        before = {i: set(inc.alert_ids) for i, inc in self.incidents.items()}
         correlated = self.correlator.correlate(self.alerts, self.event_store.all_events(), previous=self.incidents)
         self.incidents = {inc.incident_id: inc for inc in correlated}
+        changed = [inc for inc in correlated if before.get(inc.incident_id) != set(inc.alert_ids)]
         self.state_store.replace_incidents(correlated)
 
         elapsed_ms = round((time.perf_counter() - t0) * 1000.0, 2)
@@ -218,7 +220,7 @@ class SOCCopilot:
         )
 
         if auto_triage:
-            for inc in correlated:
+            for inc in changed:  # only cases this batch created or grew
                 self.triage_engine.triage_incident(inc, use_llm=False)
 
         return {

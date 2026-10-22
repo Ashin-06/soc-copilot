@@ -73,12 +73,15 @@ def render_app() -> None:
 
             c1, c2 = st.columns([1.3, 1.0])
             with c1:
-                st.subheader(f"{inc.incident_id}: {inc.title}")
+                # Titles, entities, model output and rationales all carry text from logs, so they are
+                # shown as plain text: rendered markdown could make the browser load an attacker's URL.
+                st.subheader(inc.incident_id)
+                st.text(inc.title)
                 st.markdown(f"**AI Triage Summary** *(Citation Coverage: {rep['citation_coverage']*100:.0f}% · Mode: `{rep['generated_by']}`)*")
-                st.info(rep["summary"])
+                st.text(rep["summary"])
                 st.markdown("**Likely Impact**")
                 for imp in rep.get("likely_impact", []):
-                    st.markdown(f"- {imp}")
+                    st.text(f"• {imp}")
                 st.markdown("**ATT&CK Storyline Timeline**")
                 for step in rep.get("timeline", []):
                     st.code(step, language="text")
@@ -87,8 +90,8 @@ def render_app() -> None:
                 st.subheader("Entity Graph & Risk Breakdown")
                 st.json(inc.score_breakdown)
                 st.markdown("**Linked Entities**")
-                st.write(", ".join(f"`{e}`" for e in inc.entities))
-                st.markdown("**Privacy Gateway Masking (Before LLM)**")
+                st.code("\n".join(inc.entities), language=None)
+                st.markdown("**Masked before the model**")
                 st.json(rep.get("privacy_masked_counts", {}))
 
                 st.subheader("Analyst Feedback (Tunes Rule Weights)")
@@ -103,7 +106,7 @@ def render_app() -> None:
         actions = cp.playbooks.list_actions()
         for act in actions:
             cols = st.columns([3, 2, 1, 1])
-            cols[0].markdown(f"**`{act['action_type']}`** → `{act['target']}` ({act['incident_id']})\n\n{act['rationale']}")
+            cols[0].text(f"{act['action_type']} → {act['target']} ({act['incident_id']})\n{act['rationale']}")
             cols[1].code(f"Status: {act['status']}\nSHA256: {act['digest'][:16]}...")
             if act["status"] == "pending":
                 for col, label, approve in ((cols[2], "Approve", True), (cols[3], "Decline", False)):

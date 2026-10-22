@@ -55,3 +55,12 @@ def test_feedback_cannot_silence_high_severity_rules():
     c.rule_weights["R-HIGH"] = c.rule_weights["R-LOW"] = 0.1
     assert not c.is_suppressed(Alert(alert_id="A1", rule_id="R-HIGH", title="t", severity="critical", domain="fraud", **alert))
     assert c.is_suppressed(Alert(alert_id="A2", rule_id="R-LOW", title="t", severity="low", domain="security", **alert))
+
+
+def test_auto_triage_only_reruns_cases_that_changed():
+    cp = SOCCopilot()
+    cp.process_raw_events([_bastion(1, "sudo_priv_esc", 0)], auto_triage=True)
+    quiet = {**_bastion(9, "sudo_priv_esc", 600), "data": {"action": "sudo_priv_esc", "dstuser": "other.user"}}
+    cp.process_raw_events([quiet], auto_triage=True)  # a second, unrelated case
+    triaged = [e["incident_id"] for e in cp.audit.entries if e["event"] == "incident_triaged"]
+    assert len(triaged) == 2 and len(set(triaged)) == 2
