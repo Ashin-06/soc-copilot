@@ -1,6 +1,12 @@
 # SOC Copilot for a Digital Bank
 
-A bank's security team gets thousands of alerts a day from logins, APIs, servers, cloud infrastructure, and the payments switch. Most are noise; the real incidents are scattered across different tools. This copilot pulls those signals together, groups related alerts into incidents, links security events to payment fraud signals, drafts an evidence-cited investigation report through a privacy-scrubbed AI tool loop, and suggests containment steps that only run after an analyst approves them.
+A bank's security team gets thousands of alerts a day from logins, APIs, servers, cloud infrastructure and the payments switch. Most are noise, and the real incidents are scattered across different tools.
+
+This copilot:
+- pulls those signals together and groups related alerts into incidents;
+- links security events to payment fraud on the same customer;
+- drafts an evidence-cited investigation report with Claude, without showing it customer data;
+- suggests containment steps that only run after an analyst approves them.
 
 ```
 Log sources ──► 1 Ingest ──► 2 Normalise ──► 3 Enrich ──► 4 Detect ──► 5 Correlate ──► 6 Triage (Claude) ──► 7 Respond
@@ -12,78 +18,127 @@ Log sources ──► 1 Ingest ──► 2 Normalise ──► 3 Enrich ──�
                                                                            (feedback tunes rules and scores)
 ```
 
-## Pipeline Stages
+## Stages
 
 | Stage | Module | What it does |
 |---|---|---|
-| **1. Ingest** | `soccopilot/ingest/` | Connectors for **Wazuh**, **Elastic ECS**, **AWS CloudTrail**, **Auth/SSO**, **API Gateway**, and **Payments** (`beneficiary_added`, `device_changed`, `phone_changed`, `wire_transfer`, `imps_transfer`, `rtgs_transfer`). Supports file drop (`JSON`/`JSONL`), HTTP webhook (`POST /ingest`), and Kafka topic record batches. Enforces schema validation, payload size limits, SHA-256 event hash deduplication, and per-source silence health monitoring (`SourceHealthMonitor`). |
-| **2. Normalise** | `soccopilot/normalize.py` | Maps every source onto an Elastic ECS-modelled schema (`timestamp`, `event_category`, `event_action`, `event_outcome`, `user`, `customer_id`, `source_ip`, `host`, `device_id`, `url`, `account`, `counterparty_account`, `amount`, `cloud_key`, `bytes_out`) and extracts typed entities (`user:`, `customer:`, `ip:`, `device:`, `host:`, `account:`, `cloud_key:`). |
-| **3. Enrich** | `soccopilot/enrich.py` | Adds server criticality (`1..5`) from asset inventory, staff role/department/shift hours from directory, customer account age and recent beneficiary/phone/device change flags, GeoIP country/city + Haversine impossible-travel speed, and threat intelligence IP/domain reputation scores. |
-| **4. Detect** | `soccopilot/detect.py`, `soccopilot/rules/*.yml` | Sigma-compatible YAML rule engine supporting field modifiers (`\|contains`, `\|startswith`, `\|endswith`, `\|re`, `\|gte`, `\|lt`, `\|in`), exclusions (`not filter`), and sliding time-window thresholds (`count() by actor >= N` in `5m`/`15m`), tagged with MITRE ATT&CK tactic and technique IDs. Paired with per-user/service behaviour baselines (off-hours logins, impossible travel, bulk data egress) and payment fraud detectors. |
-| **5. Correlate** | `soccopilot/correlate.py` | Builds an entity graph linking alerts across tools within a time window into connected incidents ordered along the MITRE ATT&CK kill-chain sequence. Composite risk score (`0–100`) combines rule severity, distinct tactics, asset criticality, ₹ money at risk, and a **+18 cross-domain bonus** when cyber security alerts and payment fraud signals involve the same customer. |
-| **6. AI Triage** | `soccopilot/triage.py` | Claude runs a strictly **read-only** tool-use loop (`get_incident`, `search_logs`, `entity_timeline`, `ip_reputation`, `customer_transactions`). Prompts and tool results pass through the **Project 10 LLM Privacy Gateway** (`PrivacyBridge`) so customer PII (names, PAN, phone, account numbers) is tokenized before reaching the model. Every claim in the output report cites backing `[EVT-...]` log entry IDs. Falls back to a deterministic evidence-cited report when no API key is configured. |
-| **7. Respond** | `soccopilot/playbooks.py`, `soccopilot/audit.py` | Six containment playbooks (`freeze_account`, `end_sessions`, `block_ip`, `disable_cloud_key`, `require_password_reset`, `notify_customer`). Every action requires explicit analyst approval bound to a single-use SHA-256 digest of the exact action and target (the Project 04 pattern), executes through connectors, and writes to a hash-chained, HMAC-verifiable audit log. |
-| **8. Console** | `soccopilot/api.py`, `web/console.html`, `soccopilot/app.py` | FastAPI web console (`http://127.0.0.1:8011`) and Streamlit console (`streamlit run app.py`) showing the incident queue, storyline timeline, entity graph, privacy-scrubbed AI report with clickable `[EVT-...]` evidence badges, approve/decline buttons, and TP/FP analyst feedback that tunes rule weights. |
+| **1. Ingest** | `soccopilot/ingest/` | Connectors for **Wazuh**, **Elastic ECS**, **AWS CloudTrail**, **auth/SSO**, **API gateway** and **payments**, by HTTP webhook, file drop (JSON, JSONL, CloudTrail `Records`) or record batches handed over by your Kafka consumer. Each event is checked for size, required fields and a sane timestamp (epoch seconds or milliseconds, ISO 8601; NaN and far-future values are rejected). Events are deduplicated by SHA-256 inside a bounded window. A bad record is rejected on its own without failing the batch. Every source has a silence alarm. |
+| **2. Normalise** | `normalize.py` | Maps every source onto one ECS-style schema and extracts typed entities (`user:`, `customer:`, `ip:`, `device:`, `host:`, `account:`, `cloud_key:`). Untrusted fields are coerced to the expected type or dropped. An event keeps its source ID when it is a citable `EVT-…` ID that is not taken yet. Otherwise it gets a hash-derived ID, and the original is kept in `details.source_event_id`. |
+| **3. Enrich** | `enrich.py` | Adds asset criticality (1–5), the staff directory (role, privilege tier, working hours and time zone), customer context (account age, average transfer, recent beneficiary, device or phone changes), GeoIP with impossible-travel speed, and IP/domain threat intel. Addresses it cannot place are `UNKNOWN`, never guessed. The demo directories can be replaced with a JSON export of your own (see Settings). |
+| **4. Detect** | `detect.py`, `rules/*.yml` | Sigma-style YAML rules with field modifiers (`contains`, `startswith`, `endswith`, `re`, `in`, `gt/gte/lt/lte`), `and not filter` exclusions, and windowed counts (`count() by actor >= 4` in `5m`), tagged with ATT&CK tactics and techniques. Unsupported syntax is refused when the rules load, instead of quietly never firing. Alongside the rules run behaviour baselines: off-hours staff logins in the employee's own time zone, impossible travel, bulk egress, and SIM/device swap before a large transfer. |
+| **5. Correlate** | `correlate.py` | Alerts that share a strong entity within an hour become one incident. Each incident gets an ATT&CK-ordered storyline and a 0–100 risk score: rule severity, tactic spread, asset criticality, rupees at risk, plus a cross-domain bonus when security alerts and payments involve the same customer. Incident IDs are stable: as an incident grows, or after a restart, it keeps its ID, status and analyst feedback. Feedback tunes rule weights. It can quieten a noisy low or medium rule, but never switches off a high or critical one. |
+| **6. Triage** | `triage.py` | Claude works through **read-only** tools (`get_incident`, `search_logs`, `entity_timeline`, `ip_reputation`, `customer_transactions`). Every tool result passes through the LLM Privacy Gateway engine (project 10), or a built-in masker when that project is not installed, so names, PAN, accounts, phones and emails reach the model only as placeholders. Every claim must cite `[EVT-…]` IDs, and coverage is measured. Without an API key, or if the model refuses or returns something unusable, a deterministic cited report is produced and the reason is recorded. |
+| **7. Respond** | `playbooks.py`, `audit.py` | Six playbooks: `freeze_account`, `end_sessions`, `block_ip`, `disable_cloud_key`, `require_password_reset`, `notify_customer`. Each approval is bound to a single-use SHA-256 digest of the exact action and target. Every proposal, decision, execution, expiry and failure goes into a hash-chained, optionally HMAC-keyed audit log. |
+| **8. Console** | `api.py`, `web/console.html`, `app.py` | FastAPI web console and a Streamlit console. Both show the queue, storyline, entity graph, cited report and approval buttons, and take TP/FP feedback. |
 
-## Storage Architecture
+## What stops it doing damage
 
-| Data | Store |
-|---|---|
-| Normalised events | **DuckDB** (`soccopilot/store.py:EventStore`) for single-machine analytical SQL search and entity timelines (OpenSearch/Elastic compatible schema) |
-| Incidents, reports, approvals, feedback & rule weights | **SQLite** (`soccopilot/store.py:StateStore`) |
-| Audit trail | Append-only hash-chained (and optional HMAC-SHA256) JSONL log (`soccopilot/audit.py:AuditLog`) |
+- **The model can't act.** It only has read tools. Containment it suggests is queued for a person to approve.
+- **Suggestions are checked.** A suggested action is kept only if the action is enabled in policy and the target is an entity of the right kind in the same incident. That way, text planted in a log line can't steer a proposal at an unrelated account. `block_ip` is limited to public addresses that are known-bad or were the source of a security alert, so a customer's home connection or an internal range is never proposed.
+- **Four eyes.** An analyst who raises an action by hand can't approve it. Approvals expire after an hour and can't be replayed or edited after approval.
+- **Who did it is not self-declared.** With API keys configured, the key decides the user and role (`ingest`, `viewer`, `analyst`, `approver`, `admin`). A name in the request body is ignored.
+- **Customer data stays masked.** The model sees `[[ACCOUNT_1:2011]]`, not the account number. Values are put back only in the stored report, for the configured role.
+- **Log text is shown as text.** Both consoles escape or plain-render titles, entities, model output and rationales.
+- **Tampering shows.** Editing, deleting, reordering or truncating the audit log fails verification, and the service won't start on a damaged log.
 
-## Benchmark Results
+## Benchmark
 
-`python -m soccopilot evaluate` replays **6 multi-stage attack campaigns** (spanning customer ATO + MFA fatigue + ₹1.85L wire drain, CloudTrail IAM escalation + S3 KYC vault exfiltration, API IDOR enumeration + structured smurfing transfers, bastion SSH privilege escalation + 120 MB core ledger DB dump, impossible travel + device swap + ₹2.40L RTGS drain, and insider off-hours bulk export + audit tamper) mixed with **240 benign day-in-the-life banking events** (including scheduled `svc-backup-nightly` snapshots and suppressed `svc-vuln-scanner` scans):
+`python -m soccopilot evaluate` replays six labelled multi-stage campaigns mixed with 240 benign day-in-the-life events. The benign events include `svc-backup-nightly` snapshots and suppressed `svc-vuln-scanner` scans. The six campaigns are:
+1. Customer ATO with MFA fatigue and a ₹1.85L wire.
+2. CloudTrail IAM escalation and KYC bucket exfiltration.
+3. API account enumeration with structured transfers.
+4. Bastion privilege escalation and a ledger DB dump.
+5. Impossible travel, device swap and an RTGS drain.
+6. Insider off-hours export with audit tampering.
 
 ```
-CAMP-01  Customer ATO via MFA Fatigue & ₹1.85L Wire Dra  DETECTED  INC-0001  score=100.0  events=10/10  cited=100% [SEC+FRAUD]
-CAMP-02  Cloud IAM Escalation & S3 KYC Vault Exfiltrati  DETECTED  INC-0004  score= 93.1  events=5/5    cited=100%
-CAMP-03  API IDOR Account Enumeration & Structured Smur  DETECTED  INC-0003  score= 99.3  events=8/8    cited=100% [SEC+FRAUD]
-CAMP-04  Bastion Privilege Escalation & Core Ledger DB   DETECTED  INC-0006  score= 80.0  events=3/3    cited=100%
-CAMP-05  Impossible Travel, Device Swap & ₹2.40L RTGS D  DETECTED  INC-0002  score=100.0  events=5/5    cited=100% [SEC+FRAUD]
-CAMP-06  Insider Off-Hours Bulk Statement Export & Audi  DETECTED  INC-0005  score= 88.1  events=3/3    cited=100%
---------------------------------------------------------------------------------------------
+CAMP-01  Customer ATO via MFA Fatigue & ₹1.85L Wire Dra  DETECTED  INC-4AAB49B078  score=100.0  events=10/10  cited=100% [SEC+FRAUD]
+CAMP-02  Cloud IAM Escalation & S3 KYC Vault Exfiltrati  DETECTED  INC-DAA617614E  score=100.0  events=5/5    cited=100%
+CAMP-03  API IDOR Account Enumeration & Structured Smur  DETECTED  INC-7D60A1C04D  score=100.0  events=8/8    cited=100% [SEC+FRAUD]
+CAMP-04  Bastion Privilege Escalation & Core Ledger DB   DETECTED  INC-085A432282  score=100.0  events=3/3    cited=100%
+CAMP-05  Impossible Travel, Device Swap & ₹2.40L RTGS D  DETECTED  INC-46B3D7BF2C  score=100.0  events=5/5    cited=100% [SEC+FRAUD]
+CAMP-06  Insider Off-Hours Bulk Statement Export & Audi  DETECTED  INC-ADFCE1D1BF  score= 95.0  events=3/3    cited=100%
 Detection recall:          100% (6/6 campaigns)
 Security+Fraud join rate:  100%
 False-positive noise/day:  0 incidents (240 benign events)
-Time to first alert:       < 15 ms mean
+Batch latency:             ~200-300 ms per campaign batch on a laptop (ingest to incident)
 Report citation coverage:  100% of claims backed by log IDs
 ```
 
-## Run It
+**Read this as a regression check, not a recall estimate.** The rules and baselines were written with these campaigns in view. To measure the copilot on your own data, label a JSONL export. Each line is a raw event with a unique `event_id`, plus a `label` naming the incident it belongs to; leave `label` out for benign events:
+
+```jsonl
+{"event_id": "EVT-90001", "label": "case-17", "source_type": "auth", "ts": 1761039000, "action": "login_failed", "customer_id": "C-88"}
+{"event_id": "EVT-90002", "source_type": "payments", "ts": 1761039060, "action": "upi_transfer", "amount": 450, "account": "1234567890123"}
+```
+
+```bash
+python -m soccopilot evaluate --labelled my_events.jsonl --json results.json
+```
+
+## Run it
 
 ```bash
 pip install -r requirements.txt
-python -m pytest -q                              # 7 end-to-end tests
-python -m soccopilot evaluate                    # benchmark across 6 multi-stage campaigns + normal traffic
-python -m soccopilot triage INC-0001             # inspect structured triage report & containment proposals
-python -m soccopilot serve --port 8011           # FastAPI Analyst Console on http://127.0.0.1:8011
-streamlit run app.py                             # Streamlit Analyst Console
+python -m pytest -q                      # 47 tests
+python -m soccopilot evaluate            # built-in benchmark
+python -m soccopilot triage              # report and containment proposals for the top incident (--live uses Claude)
+python -m soccopilot ingest events.jsonl # run a file through the whole pipeline
+python -m soccopilot serve --port 8011   # web console on http://127.0.0.1:8011
+streamlit run app.py                     # Streamlit console
 ```
 
-## Package Layout
+### Web API and roles
+
+| Endpoint | Needs |
+|---|---|
+| `GET /health`, `/incidents`, `/incidents/{id}`, `/incidents/{id}/report`, `/actions`, `/audit` | `viewer` and above |
+| `POST /ingest` | `ingest`, `analyst`, `admin` |
+| `POST /incidents/{id}/report` (`{"use_llm": true}` for Claude), `/incidents/{id}/feedback`, `/actions` | `analyst`, `approver`, `admin` |
+| `POST /actions/{id}/decide` | `approver`, `admin` |
+| `GET /evaluate`, `POST /reset` | `admin` |
+
+Send the key as `x-api-key` or `Authorization: Bearer …`. **With no keys configured the API runs in demo mode:** every endpoint is open and the console's analyst name is trusted. `/health` says which mode is active.
+
+## Settings
+
+| Variable | Purpose |
+|---|---|
+| `SOCCOPILOT_API_KEYS` / `SOCCOPILOT_KEYS_FILE` | JSON `{"<key>": {"user": "meera", "role": "analyst"}, …}`; keys are held only as SHA-256 hashes |
+| `SOCCOPILOT_DATA_DIR` | keep events (DuckDB), cases (SQLite) and the audit log on disk here, with no demo seeding; state is rebuilt on restart |
+| `SOCCOPILOT_AUDIT_KEY` | HMAC key for the audit chain |
+| `SOCCOPILOT_POLICY` | alternative to `policy.toml`: thresholds, suppressions, scoring weights, triage model, enabled playbooks |
+| `SOCCOPILOT_CONTEXT` | JSON with `assets`, `staff`, `customers`, `geo_prefixes`, `threat_intel_ips` to replace the demo directories |
+| `ANTHROPIC_API_KEY`, `SOCCOPILOT_MODEL` | live triage with Claude (default `claude-opus-5-5`) |
+| `SOCCOPILOT_LLM_BASE_URL` | send triage traffic through a deployed privacy gateway |
+| `SOCCOPILOT_PRIVGATE_DIR` | where project 10 is, if not next to this folder |
+
+## Layout
 
 ```
-11-soc-copilot/
-  soccopilot/
-    ingest/
-      connectors.py   Wazuh, ECS, CloudTrail, Auth, API Gateway, Payments (webhook, file drop, Kafka)
-      validator.py    schema validation, size limits, SHA-256 deduplication, SourceHealthMonitor
-    normalize.py      ECS common schema + entity extraction
-    enrich.py         asset inventory, staff directory, GeoIP + impossible travel, threat intel, customer context
-    rules/            10 Sigma-compatible YAML rules tagged with MITRE ATT&CK tactics & techniques
-    detect.py         Sigma rule engine (modifiers, filters, sliding windows) + behaviour baselines
-    correlate.py      entity graph, ATT&CK storyline ordering, composite risk score, feedback tuning
-    triage.py         Claude read-only tool loop + Project 10 privacy bridge + template fallback
-    playbooks.py      6 containment playbooks + single-use SHA-256 call-bound approvals + connectors
-    audit.py          tamper-evident hash-chained audit log
-    store.py          DuckDB analytical event store + SQLite incident/approval/feedback store
-    api.py            FastAPI server (/ingest, /health, /incidents, /incidents/{id}/report, /actions, /audit)
-    app.py            Streamlit analyst console
-    evaluate.py       benchmark runner & 6 multi-stage labelled campaigns
-  web/console.html    Interactive web analyst console
-  policy.toml         Thresholds, scoring weights, suppression lists, and playbook configuration
-  tests/test_soccopilot.py
+soccopilot/
+  ingest/        connectors (webhook, file drop, Kafka), validation, dedupe, source health
+  normalize.py   common schema, entities, event IDs
+  enrich.py      assets, staff, customers, GeoIP + impossible travel, threat intel
+  rules/         10 Sigma-style rules tagged with ATT&CK
+  detect.py      rule engine + behaviour baselines
+  correlate.py   entity grouping, storyline, risk score, stable IDs, feedback tuning
+  triage.py      read-only Claude loop, privacy bridge, recommendation checks, template report
+  playbooks.py   containment playbooks, call-bound approvals, connectors
+  pipeline.py    runs the stages; analyst actions shared by both consoles
+  store.py       DuckDB event store, SQLite case store
+  audit.py       hash-chained audit log
+  api.py         FastAPI + auth
+  app.py         Streamlit console
+  evaluate.py    labelled campaigns, benchmark, labelled-file scoring
+web/console.html
+policy.toml
 ```
+
+## Limits
+
+- **Connectors are simulated.** `ConnectorSuite` records what it would do. Wire it to your firewall, IdP, core banking and cloud IAM APIs before relying on it.
+- **One process.** State is guarded by a single lock, and every batch re-correlates all alerts. That is fine for a team's daily volume, not for a whole SIEM firehose. At that scale, window correlation by time and move the case store to Postgres.
+- **The Streamlit console has no login.** Run it behind your SSO proxy, or use the web console with API keys.
+- **No rate limiting** on the API. Put it behind your gateway.
+- **The built-in masker covers fewer identifier types than project 10** (no Aadhaar, card or UPI checks), and restores values for every role. Install project 10 alongside this one for real use.
