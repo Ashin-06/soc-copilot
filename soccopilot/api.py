@@ -26,8 +26,9 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
-from .evaluate import SOCCopilot, run_evaluation, seed_demo_copilot
+from .evaluate import run_evaluation, seed_demo_copilot
 from .ingest import IngestValidationError
+from .pipeline import SOCCopilot
 
 ROOT = Path(__file__).resolve().parent.parent
 app = FastAPI(title="SOC Copilot for a Digital Bank", version="1.0.0")
