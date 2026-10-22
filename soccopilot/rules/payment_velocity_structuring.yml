@@ -1,0 +1,25 @@
+title: Payment Velocity Structuring Just Below Reporting Threshold
+id: SIGMA-BANK-008
+status: stable
+description: Detects 3 or more transfers between INR 45,000 and INR 49,999 from the same customer within 15 minutes.
+logsource:
+  category: payment
+  service: payments
+tags:
+  - attack.impact
+  - attack.t1657
+  - domain.fraud
+detection:
+  selection:
+    event_category: payment
+    event_action:
+      - wire_transfer
+      - upi_transfer
+      - imps_transfer
+    amount|gte: 45000
+    amount|lt: 50000
+  timeframe: 15m
+  condition: selection | count() by customer_id >= 3
+level: critical
+falsepositives:
+  - Split merchant settlement payouts

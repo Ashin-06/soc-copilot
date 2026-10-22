@@ -1,0 +1,21 @@
+title: MFA Push Fatigue Bombing
+id: SIGMA-BANK-002
+status: stable
+description: Detects repeated MFA push notifications denied before approval within 5 minutes.
+logsource:
+  category: authentication
+  service: auth
+tags:
+  - attack.credential_access
+  - attack.t1621
+detection:
+  selection:
+    event_category: authentication
+    event_action:
+      - mfa_push_denied
+      - mfa_push_approved
+  timeframe: 5m
+  condition: selection | count() by actor >= 3
+level: high
+falsepositives:
+  - Push delivery delays causing user to retry MFA prompt

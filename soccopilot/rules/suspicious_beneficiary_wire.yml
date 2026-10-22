@@ -1,0 +1,24 @@
+title: High-Value Wire Transfer Following Recent Beneficiary or Device Change
+id: SIGMA-BANK-004
+status: stable
+description: Detects outbound wire/IMPS/RTGS transfers >= INR 75,000 within 30 minutes of a beneficiary, phone, or device change.
+logsource:
+  category: payment
+  service: payments
+tags:
+  - attack.impact
+  - attack.t1657
+  - domain.fraud
+detection:
+  selection:
+    event_category: payment
+    event_action:
+      - wire_transfer
+      - imps_transfer
+      - rtgs_transfer
+    amount|gte: 75000
+    enrichment.recent_beneficiary_change: true
+  condition: selection
+level: critical
+falsepositives:
+  - Verified high-net-worth urgent transfer to newly added vendor

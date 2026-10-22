@@ -1,0 +1,24 @@
+title: Bastion Host SSH Intrusion and Sudo Privilege Escalation
+id: SIGMA-BANK-009
+status: stable
+description: Detects privilege escalation or unauthorized sudo / Lateral SSH execution on production bastion or database hosts.
+logsource:
+  category: process
+  service: wazuh
+tags:
+  - attack.privilege_escalation
+  - attack.lateral_movement
+  - attack.t1548.003
+detection:
+  selection:
+    source: wazuh
+    event_action:
+      - sudo_priv_esc
+      - ssh_lateral_exec
+      - unauthorized_key_added
+  filter:
+    user: svc-vuln-scanner
+  condition: selection and not filter
+level: high
+falsepositives:
+  - Planned SRE maintenance window

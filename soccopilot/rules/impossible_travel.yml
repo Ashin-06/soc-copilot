@@ -1,0 +1,22 @@
+title: Impossible Travel or High-Risk Threat Intel IP Login
+id: SIGMA-BANK-003
+status: stable
+description: Detects successful authentication from a known malicious threat-intel IP or involving impossible geographic travel.
+logsource:
+  category: authentication
+  service: auth
+tags:
+  - attack.initial_access
+  - attack.t1078
+detection:
+  selection:
+    event_category: authentication
+    event_action: login_success
+    event_outcome: success
+    enrichment.ip_reputation_score|gte: 0.75
+  filter:
+    user: svc-vuln-scanner
+  condition: selection and not filter
+level: high
+falsepositives:
+  - Travelling customer using an unannounced VPN exit node

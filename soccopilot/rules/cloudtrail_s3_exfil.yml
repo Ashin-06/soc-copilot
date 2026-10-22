@@ -1,0 +1,26 @@
+title: CloudTrail S3 Bucket Policy Weakening or Bulk KYC Vault Exfiltration
+id: SIGMA-BANK-006
+status: stable
+description: Detects S3 bucket policy modification or large bulk download from customer KYC storage.
+logsource:
+  category: storage
+  service: cloudtrail
+tags:
+  - attack.collection
+  - attack.exfiltration
+  - attack.t1530
+detection:
+  selection:
+    source: cloudtrail
+    event_action:
+      - PutBucketPolicy
+      - PutBucketAcl
+      - GetObjectBatch
+      - DeleteTrail
+    event_outcome: success
+  filter:
+    user: svc-backup-nightly
+  condition: selection and not filter
+level: critical
+falsepositives:
+  - Approved infrastructure migration

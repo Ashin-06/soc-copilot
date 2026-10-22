@@ -1,0 +1,22 @@
+title: Credential Brute Force Against Banking Login
+id: SIGMA-BANK-001
+status: stable
+description: Detects 4 or more failed login attempts against the same user or customer within 5 minutes.
+logsource:
+  category: authentication
+  service: auth
+tags:
+  - attack.credential_access
+  - attack.t1110.001
+detection:
+  selection:
+    event_category: authentication
+    event_action: login_failed
+    event_outcome: failure
+  filter:
+    user: svc-vuln-scanner
+  timeframe: 5m
+  condition: selection and not filter | count() by actor >= 4
+level: medium
+falsepositives:
+  - Customer repeatedly mistyping password more than 4 times

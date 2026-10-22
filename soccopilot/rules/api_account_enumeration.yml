@@ -1,0 +1,21 @@
+title: API Gateway High-Velocity Account IDOR Enumeration
+id: SIGMA-BANK-007
+status: stable
+description: Detects 5 or more account lookup calls from the same client IP within 5 minutes.
+logsource:
+  category: api
+  service: api_gateway
+tags:
+  - attack.discovery
+  - attack.t1087
+detection:
+  selection:
+    event_category: api
+    url|contains: /api/v1/accounts/
+  filter:
+    source_ip: 10.250.0.99
+  timeframe: 5m
+  condition: selection and not filter | count() by source_ip >= 5
+level: high
+falsepositives:
+  - Internal batch reconciliation service

@@ -1,0 +1,24 @@
+title: Production Core Ledger Database Bulk Export or Audit Tamper
+id: SIGMA-BANK-010
+status: stable
+description: Detects large database table dumps or audit-log tampering on core banking servers.
+logsource:
+  category: database
+  service: wazuh
+tags:
+  - attack.collection
+  - attack.exfiltration
+  - attack.defense_evasion
+  - attack.t1005
+detection:
+  selection:
+    event_action:
+      - db_bulk_dump
+      - audit_log_stop
+      - bulk_statement_export
+  filter:
+    user: svc-backup-nightly
+  condition: selection and not filter
+level: critical
+falsepositives:
+  - Scheduled nightly DBA snapshot by svc-backup-nightly
