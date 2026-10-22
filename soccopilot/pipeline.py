@@ -1,7 +1,9 @@
 """Pipeline coordinator: runs every stage from ingest to triage for a batch of raw events."""
 from __future__ import annotations
 
+import os
 import time
+import tomllib
 from pathlib import Path
 from typing import Any
 
@@ -13,7 +15,14 @@ from .ingest import IngestBatchResult, IngestService
 from .normalize import NormalizedEvent, normalize_envelope
 from .playbooks import PlaybookEngine
 from .store import EventStore, StateStore
-from .triage import TriageEngine
+from .triage import MODEL, PrivacyBridge, TriageEngine
+
+DEFAULT_POLICY = Path(__file__).resolve().parent.parent / "policy.toml"
+
+
+def load_policy(path: str | Path | None = None) -> dict[str, Any]:
+    with open(path or os.environ.get("SOCCOPILOT_POLICY") or DEFAULT_POLICY, "rb") as f:
+        return tomllib.load(f)
 
 
 class SOCCopilot:
@@ -25,21 +34,34 @@ class SOCCopilot:
         sqlite_path: str | Path | None = None,
         audit_path: str | Path | None = None,
         audit_key: bytes | str | None = None,
+        policy_path: str | Path | None = None,
+        context_path: str | Path | None = None,
     ):
+        self.policy = load_policy(policy_path)
+        self.context_path = context_path or os.environ.get("SOCCOPILOT_CONTEXT")
+        tri, pb = self.policy.get("triage", {}), self.policy.get("playbooks", {})
         self.audit = AuditLog(path=audit_path, key=audit_key)
         self.event_store = EventStore(path=duckdb_path)
         self.state_store = StateStore(path=sqlite_path)
-        self.ingest_service = IngestService()
-        self.enricher = Enricher()
+        self.ingest_service = self._new_ingest()
+        self.enricher = Enricher(self.context_path)
         self.detector = DetectionEngine()
-        self.correlator = Correlator()
-        self.playbooks = PlaybookEngine(audit=self.audit, state_store=self.state_store)
+        self.correlator = self._new_correlator()
+        self.playbooks = PlaybookEngine(
+            audit=self.audit,
+            state_store=self.state_store,
+            ttl=float(pb.get("approval_ttl_seconds", 3600)),
+            allowed_actions=pb.get("allowed_actions"),
+        )
         self.triage_engine = TriageEngine(
             event_store=self.event_store,
             state_store=self.state_store,
             enricher=self.enricher,
             playbooks=self.playbooks,
             audit=self.audit,
+            privacy=PrivacyBridge(role=tri.get("privacy_role", "fraud_analyst")),
+            model=os.environ.get("SOCCOPILOT_MODEL") or tri.get("model", MODEL),
+            max_turns=int(tri.get("max_turns", 8)),
         )
         self.alerts: list[Alert] = []
         self.incidents: dict[str, Incident] = {}
@@ -58,14 +80,38 @@ class SOCCopilot:
         previous = {d["incident_id"]: Incident(**d) for d in self.state_store.list_incidents()}
         self.incidents = {i.incident_id: i for i in self.correlator.correlate(self.alerts, events, previous=previous)}
 
+    def _new_ingest(self) -> IngestService:
+        ing = self.policy.get("ingest", {})
+        return IngestService(
+            max_event_bytes=int(ing.get("max_event_bytes", 65536)),
+            max_batch_size=int(ing.get("max_batch_size", 5000)),
+            silence_thresholds={k: float(v) for k, v in ing.get("silence_seconds", {}).items()},
+            dedup_window_s=float(ing.get("dedup_window_seconds", 86400)),
+        )
+
+    def _new_correlator(self) -> Correlator:
+        cor, sc = self.policy.get("correlate", {}), self.policy.get("scoring", {})
+        return Correlator(
+            time_window_s=float(cor.get("time_window_seconds", 3600)),
+            security_fraud_bonus=float(cor.get("security_fraud_bonus", 18.0)),
+            min_incident_score=float(cor.get("min_incident_score", 25.0)),
+            suppressed_ips=cor.get("suppressed_ips"),
+            suppressed_users=cor.get("suppressed_users"),
+            severity_weights=sc.get("severity_weights"),
+            tactic_bonus_per_stage=float(sc.get("tactic_bonus_per_stage", 7.5)),
+            asset_criticality_weight=float(sc.get("asset_criticality_weight", 3.0)),
+            money_at_risk_scale=float(sc.get("money_at_risk_scale", 10000.0)),
+            money_at_risk_max_bonus=float(sc.get("money_at_risk_max_bonus", 20.0)),
+        )
+
     def reset(self) -> None:
         self.event_store.clear()
         self.state_store.clear()
-        self.ingest_service = IngestService()
-        self.enricher = Enricher()
+        self.ingest_service = self._new_ingest()
+        self.enricher = Enricher(self.context_path)
         self.triage_engine.enricher = self.enricher
         self.detector.reset()
-        self.correlator = Correlator()
+        self.correlator = self._new_correlator()
         self.playbooks.reset()
         self.alerts.clear()
         self.incidents.clear()

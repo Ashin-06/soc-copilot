@@ -106,14 +106,25 @@ class Correlator:
         time_window_s: float = 3600.0,
         security_fraud_bonus: float = 18.0,
         min_incident_score: float = 25.0,
-        suppressed_ips: set[str] | None = None,
-        suppressed_users: set[str] | None = None,
+        suppressed_ips: set[str] | list[str] | None = None,
+        suppressed_users: set[str] | list[str] | None = None,
+        severity_weights: dict[str, float] | None = None,
+        tactic_bonus_per_stage: float = 7.5,
+        asset_criticality_weight: float = 3.0,
+        money_at_risk_scale: float = 10000.0,
+        money_at_risk_max_bonus: float = 20.0,
     ):
         self.time_window_s = time_window_s
         self.security_fraud_bonus = security_fraud_bonus
         self.min_incident_score = min_incident_score
-        self.suppressed_ips = set(suppressed_ips or {"10.250.0.99"})
-        self.suppressed_users = set(suppressed_users or {"svc-vuln-scanner"})
+        # an explicitly empty list in policy means "suppress nothing", not "use the demo defaults"
+        self.suppressed_ips = set(suppressed_ips) if suppressed_ips is not None else {"10.250.0.99"}
+        self.suppressed_users = set(suppressed_users) if suppressed_users is not None else {"svc-vuln-scanner"}
+        self.severity_weights = {**SEVERITY_BASE, **(severity_weights or {})}
+        self.tactic_bonus_per_stage = tactic_bonus_per_stage
+        self.asset_criticality_weight = asset_criticality_weight
+        self.money_at_risk_scale = money_at_risk_scale
+        self.money_at_risk_max_bonus = money_at_risk_max_bonus
         self.rule_weights: dict[str, float] = defaultdict(lambda: 1.0)
         self.feedback_history: list[dict[str, Any]] = []
 
@@ -132,7 +143,7 @@ class Correlator:
         events: list[NormalizedEvent],
     ) -> tuple[float, str, dict[str, float]]:
         weighted_vals = [
-            SEVERITY_BASE.get(a.severity, 20.0) * self.rule_weights[a.rule_id]
+            self.severity_weights.get(a.severity, 20.0) * self.rule_weights[a.rule_id]
             for a in alerts
         ]
         max_sev = max(weighted_vals) if weighted_vals else 0.0
@@ -140,10 +151,10 @@ class Correlator:
         rule_component = round(max_sev + extra_alerts_bonus, 2)
 
         distinct_tactics = {t for a in alerts for t in a.tactics}
-        tactic_component = round(max(0, len(distinct_tactics) - 1) * 7.5, 2)
+        tactic_component = round(max(0, len(distinct_tactics) - 1) * self.tactic_bonus_per_stage, 2)
 
         max_crit = max((a.asset_criticality for a in alerts), default=2)
-        asset_component = round(max_crit * 3.0, 2)
+        asset_component = round(max_crit * self.asset_criticality_weight, 2)
 
         # Sum unique payment amounts across correlated events
         payment_events = {
@@ -152,7 +163,8 @@ class Correlator:
             if e.event_category == "payment" and e.amount > 0
         }
         money_at_risk = sum(payment_events.values()) if payment_events else max((a.money_at_risk for a in alerts), default=0.0)
-        money_component = round(min(20.0, (money_at_risk / 50000.0) * 5.0), 2) if money_at_risk > 0 else 0.0
+        # one point per `money_at_risk_scale` rupees, capped
+        money_component = round(min(self.money_at_risk_max_bonus, money_at_risk / self.money_at_risk_scale), 2) if money_at_risk > 0 else 0.0
 
         domains = {a.domain for a in alerts}
         # Also detect when security alerts link to payment/account_change events for the same customer

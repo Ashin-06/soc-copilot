@@ -1,38 +1,37 @@
-# SOC Copilot Configuration & Policy
+# SOC Copilot policy. Loaded at start-up; point SOCCOPILOT_POLICY at another file to override.
 
 [ingest]
 max_event_bytes = 65536
 max_batch_size = 5000
-dedup_window_seconds = 86400
-default_silence_threshold_seconds = 900
+dedup_window_seconds = 86400          # an identical event inside this window is dropped as a duplicate
 
-[ingest.sources]
-wazuh = { silence_seconds = 600, required = ["timestamp", "rule"] }
-ecs = { silence_seconds = 600, required = ["@timestamp", "event"] }
-cloudtrail = { silence_seconds = 900, required = ["eventTime", "eventName"] }
-auth = { silence_seconds = 300, required = ["ts", "action"] }
-api_gateway = { silence_seconds = 300, required = ["ts", "path"] }
-payments = { silence_seconds = 300, required = ["ts", "action"] }
+# A source that sends nothing for longer than this is reported as silent on /health.
+[ingest.silence_seconds]
+wazuh = 600
+ecs = 600
+cloudtrail = 900
+auth = 300
+api_gateway = 300
+payments = 300
 
 [correlate]
-time_window_seconds = 3600
+time_window_seconds = 3600            # alerts sharing an entity within this window join one incident
 security_fraud_bonus = 18.0
 min_incident_score = 25.0
-suppressed_ips = ["10.250.0.99"]
+suppressed_ips = ["10.250.0.99"]      # authorised internal scanner
 suppressed_users = ["svc-vuln-scanner"]
 
 [scoring]
-severity_weights = { low = 10.0, medium = 22.0, high = 36.0, critical = 52.0 }
-tactic_bonus_per_stage = 7.5
-asset_criticality_weight = 4.0
-money_at_risk_scale = 50000.0
-money_at_risk_max_bonus = 20.0
+severity_weights = { low = 12.0, medium = 24.0, high = 38.0, critical = 52.0 }
+tactic_bonus_per_stage = 7.5          # per ATT&CK tactic beyond the first
+asset_criticality_weight = 3.0        # x asset criticality (1-5)
+money_at_risk_scale = 10000.0         # one point per this many rupees at risk...
+money_at_risk_max_bonus = 20.0        # ...up to this many points
 
 [triage]
-model = "claude-opus-5-5"
+model = "claude-opus-5-5"             # SOCCOPILOT_MODEL overrides
 max_turns = 8
-privacy_role = "fraud_analyst"
-mask_customer_pii = true
+privacy_role = "fraud_analyst"        # project 10 role whose values are restored in reports
 
 [playbooks]
 approval_ttl_seconds = 3600
