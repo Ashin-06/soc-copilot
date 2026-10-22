@@ -4,27 +4,35 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import json
+import math
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 
 class IngestValidationError(ValueError):
     """Raised when a raw log event fails schema or size validation."""
 
 
+def _epoch(val: float) -> float:
+    if not math.isfinite(val) or val <= 0:
+        raise IngestValidationError(f"invalid numeric timestamp: {val}")
+    # payment switches and Kafka producers often send epoch milliseconds
+    return val / 1000.0 if val > 1e11 else val
+
+
 def parse_timestamp(val: str | int | float | None) -> float:
     if val is None:
         raise IngestValidationError("missing timestamp")
+    if isinstance(val, bool):
+        raise IngestValidationError("timestamp cannot be a boolean")
     if isinstance(val, (int, float)):
-        if val <= 0:
-            raise IngestValidationError(f"invalid numeric timestamp: {val}")
-        return float(val)
+        return _epoch(float(val))
     if isinstance(val, str):
         s = val.strip()
         if not s:
             raise IngestValidationError("empty timestamp string")
         try:
-            return float(s)
+            return _epoch(float(s))
         except ValueError:
             pass
         if s.endswith("Z"):
@@ -167,14 +175,26 @@ class EventValidator:
         "payments": ("ts", "action"),
     }
 
-    def __init__(self, max_event_bytes: int = 65536, max_batch_size: int = 5000):
+    def __init__(
+        self,
+        max_event_bytes: int = 65536,
+        max_batch_size: int = 5000,
+        dedup_window_s: float = 86400.0,
+        max_future_skew_s: float = 3600.0,
+        max_dedup_entries: int = 1_000_000,
+    ):
         self.max_event_bytes = max_event_bytes
         self.max_batch_size = max_batch_size
+        self.dedup_window_s = dedup_window_s
+        self.max_future_skew_s = max_future_skew_s
+        self.max_dedup_entries = max_dedup_entries
         self.seen_hashes: dict[str, float] = {}
+        self._newest_ts = 0.0
+        self._prune_at = 4096
 
     def detect_source(self, raw: dict) -> str:
-        if "source_type" in raw and raw["source_type"] in self.REQUIRED_FIELDS:
-            return str(raw["source_type"])
+        if isinstance(raw.get("source_type"), str) and raw["source_type"] in self.REQUIRED_FIELDS:
+            return raw["source_type"]
         if "eventTime" in raw and ("eventName" in raw or "eventSource" in raw):
             return "cloudtrail"
         if "@timestamp" in raw and "event" in raw:
@@ -215,6 +235,8 @@ class EventValidator:
 
         ts_field = {"wazuh": "timestamp", "ecs": "@timestamp", "cloudtrail": "eventTime"}.get(src, "ts")
         ts = parse_timestamp(raw.get(ts_field))
+        if ts > time.time() + self.max_future_skew_s:
+            raise IngestValidationError("timestamp is too far in the future (clock skew or bad parse)")
 
         if src == "wazuh" and not isinstance(raw.get("rule"), dict):
             raise IngestValidationError("wazuh 'rule' field must be an object")
@@ -225,15 +247,28 @@ class EventValidator:
                 amt = float(raw["amount"])
             except (TypeError, ValueError) as e:
                 raise IngestValidationError(f"invalid payment amount: {raw['amount']!r}") from e
-            if amt < 0:
-                raise IngestValidationError("payment amount cannot be negative")
+            if not math.isfinite(amt) or amt < 0:
+                raise IngestValidationError(f"invalid payment amount: {raw['amount']!r}")
 
         ev_hash = compute_event_hash(src, raw)
         return src, ev_hash, ts
 
     def check_and_mark_dedup(self, ev_hash: str, ts: float) -> bool:
-        """Returns True if the event is new, or False if it is a duplicate."""
+        """Returns True if the event is new, or False if it was already seen within the
+        dedupe window. Older hashes are forgotten so memory stays bounded."""
         if ev_hash in self.seen_hashes:
             return False
         self.seen_hashes[ev_hash] = ts
+        self._newest_ts = max(self._newest_ts, ts)
+        if len(self.seen_hashes) >= self._prune_at:
+            self._prune()
         return True
+
+    def _prune(self) -> None:
+        cutoff = self._newest_ts - self.dedup_window_s
+        kept = {h: t for h, t in self.seen_hashes.items() if t >= cutoff}
+        if len(kept) > self.max_dedup_entries:
+            # still too many inside the window: keep the newest
+            kept = dict(sorted(kept.items(), key=lambda kv: kv[1])[-self.max_dedup_entries:])
+        self.seen_hashes = kept
+        self._prune_at = max(4096, 2 * len(kept))
