@@ -43,12 +43,27 @@ class SOCCopilot:
         )
         self.alerts: list[Alert] = []
         self.incidents: dict[str, Incident] = {}
+        if self.event_store.count():
+            self._replay()
+
+    def _replay(self) -> None:
+        """Rebuild in-memory state after a restart. Alerts are derived data, so they are
+        recomputed from the stored events; incident IDs, analyst status and feedback come back
+        from SQLite through the correlator's carry-over."""
+        events = self.event_store.all_events()
+        for ev in events:
+            self.ingest_service.validator.seen_hashes[ev.raw_hash] = ev.timestamp
+            self.alerts.extend(self.detector.evaluate_event(self.enricher.enrich(ev)))
+        self.correlator.rule_weights.update(self.state_store.rule_weights())
+        previous = {d["incident_id"]: Incident(**d) for d in self.state_store.list_incidents()}
+        self.incidents = {i.incident_id: i for i in self.correlator.correlate(self.alerts, events, previous=previous)}
 
     def reset(self) -> None:
         self.event_store.clear()
         self.state_store.clear()
         self.ingest_service = IngestService()
         self.enricher = Enricher()
+        self.triage_engine.enricher = self.enricher
         self.detector.reset()
         self.correlator = Correlator()
         self.playbooks.reset()
@@ -101,9 +116,10 @@ class SOCCopilot:
         self.alerts.extend(new_alerts)
 
         # Re-correlate active alerts into incidents
-        correlated = self.correlator.correlate(self.alerts, self.event_store.all_events())
+        # ponytail: re-correlates every alert on each batch; window by time once alert volume makes this slow
+        correlated = self.correlator.correlate(self.alerts, self.event_store.all_events(), previous=self.incidents)
         self.incidents = {inc.incident_id: inc for inc in correlated}
-        self.state_store.save_incidents(correlated)
+        self.state_store.replace_incidents(correlated)
 
         elapsed_ms = round((time.perf_counter() - t0) * 1000.0, 2)
         self.audit.append(

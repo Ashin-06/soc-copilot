@@ -4,6 +4,8 @@ incidents ordered along the MITRE ATT&CK tactic sequence, compute composite risk
 """
 from __future__ import annotations
 
+import hashlib
+import ipaddress
 import math
 from collections import defaultdict
 from dataclasses import asdict, dataclass, field
@@ -73,6 +75,20 @@ def _correlation_entities(entities: list[str]) -> set[str]:
     return out
 
 
+def _is_public_ip(value: str) -> bool:
+    try:
+        return ipaddress.ip_address(value).is_global
+    except ValueError:
+        return False
+
+
+def _anchor(entity: str) -> bool:
+    """Entities specific enough to pull surrounding context events into an incident."""
+    if entity.startswith(("customer:", "user:", "account:", "cloud_key:")):
+        return True
+    return entity.startswith("ip:") and _is_public_ip(entity[3:])
+
+
 def _tactic_rank(tactics: list[str]) -> int:
     if not tactics:
         return len(TACTIC_ORDER)
@@ -106,9 +122,9 @@ class Correlator:
             return True
         if alert.user and alert.user in self.suppressed_users:
             return True
-        if self.rule_weights[alert.rule_id] <= 0.2:
-            return True
-        return False
+        # Feedback may silence a noisy low/medium rule, but never a high or critical one:
+        # a few false-positive clicks must not be able to switch off ransomware or fraud detection.
+        return alert.severity in ("low", "medium") and self.rule_weights[alert.rule_id] <= 0.2
 
     def score_group(
         self,
@@ -170,7 +186,10 @@ class Correlator:
         self,
         alerts: list[Alert],
         all_events: dict[str, NormalizedEvent] | list[NormalizedEvent],
+        previous: dict[str, Incident] | None = None,
     ) -> list[Incident]:
+        """Group alerts into incidents. Pass the previous incidents so that IDs, analyst
+        status and feedback survive re-correlation when new alerts arrive."""
         if isinstance(all_events, list):
             event_map = {e.event_id: e for e in all_events}
         else:
@@ -180,42 +199,40 @@ class Correlator:
         if not active_alerts:
             return []
 
+        # Two alerts are linked when they share a strong entity within the time window.
+        # Per entity, sorting by time and joining neighbours gives the same components as
+        # comparing every pair, in O(n log n) instead of O(n^2).
         n = len(active_alerts)
-        adj: dict[int, set[int]] = defaultdict(set)
-        edge_reasons: dict[tuple[int, int], str] = {}
+        parent = list(range(n))
 
-        corr_ents = [_correlation_entities(a.entities) for a in active_alerts]
-        for i in range(n):
-            for j in range(i + 1, n):
-                if abs(active_alerts[i].timestamp - active_alerts[j].timestamp) > self.time_window_s:
-                    continue
-                shared = corr_ents[i] & corr_ents[j]
-                if shared:
-                    adj[i].add(j)
-                    adj[j].add(i)
-                    # Prefer customer/user/account/ip when labelling the link
-                    best = sorted(shared, key=lambda x: (0 if x.startswith(("customer:", "user:", "account:")) else 1, x))[0]
-                    edge_reasons[(i, j)] = best
+        def find(i: int) -> int:
+            while parent[i] != i:
+                parent[i] = parent[parent[i]]
+                i = parent[i]
+            return i
 
-        visited: set[int] = set()
-        components: list[list[int]] = []
+        by_entity: dict[str, list[int]] = defaultdict(list)
+        for i, a in enumerate(active_alerts):
+            for ent in _correlation_entities(a.entities):
+                by_entity[ent].append(i)
+        for members in by_entity.values():
+            members.sort(key=lambda i: active_alerts[i].timestamp)
+            for a, b in zip(members, members[1:]):
+                if active_alerts[b].timestamp - active_alerts[a].timestamp <= self.time_window_s:
+                    parent[find(a)] = find(b)
+        groups: dict[int, list[int]] = defaultdict(list)
         for i in range(n):
-            if i in visited:
-                continue
-            comp: list[int] = []
-            stack = [i]
-            visited.add(i)
-            while stack:
-                cur = stack.pop()
-                comp.append(cur)
-                for nxt in adj[cur]:
-                    if nxt not in visited:
-                        visited.add(nxt)
-                        stack.append(nxt)
-            components.append(comp)
+            groups[find(i)].append(i)
+        components = list(groups.values())
+
+        events_by_anchor: dict[str, list[NormalizedEvent]] = defaultdict(list)
+        for ev in event_map.values():
+            for ent in _correlation_entities(ev.entities):
+                if _anchor(ent):
+                    events_by_anchor[ent].append(ev)
 
         incidents: list[Incident] = []
-        for idx, comp in enumerate(components, start=1):
+        for comp in components:
             comp_alerts = [active_alerts[i] for i in comp]
             # Order alerts along ATT&CK tactic sequence, then timestamp
             comp_alerts.sort(key=lambda a: (_tactic_rank(a.tactics), a.timestamp))
@@ -234,14 +251,9 @@ class Correlator:
 
             # Pull alert events + related context events sharing a primary actor/account/IP in window
             ev_ids_set: set[str] = {eid for a in comp_alerts for eid in a.event_ids}
-            anchor_ents = {
-                e for e in strong_ents
-                if e.startswith(("customer:", "user:", "account:", "cloud_key:"))
-                or (e.startswith("ip:") and not e.startswith("ip:10."))
-            }
-            for ev in event_map.values():
-                if min_ts <= ev.timestamp <= max_ts:
-                    if anchor_ents & _correlation_entities(ev.entities):
+            for anchor in sorted(e for e in strong_ents if _anchor(e)):
+                for ev in events_by_anchor.get(anchor, []):
+                    if min_ts <= ev.timestamp <= max_ts and ev.event_id not in ev_ids_set:
                         ev_ids_set.add(ev.event_id)
                         for ent in ev.entities:
                             if ent not in all_ents:
@@ -333,16 +345,18 @@ class Correlator:
                 (e.split(":", 1)[1] for e in all_ents if e.startswith(("customer:", "user:"))),
                 comp_alerts[0].source_ip or comp_alerts[0].host or "Unknown",
             )
+            # Titles state what was observed; whether it is account takeover is the analyst's call.
             if sec_fraud_joined:
-                inc_title = f"Account Takeover & Fraudulent Transfer ({primary_actor})"
+                inc_title = f"Security alerts linked to ₹{money_at_risk:,.0f} in payments ({primary_actor})"
             elif len(comp_alerts) > 1:
                 inc_title = f"{comp_alerts[0].title} → {comp_alerts[-1].title} ({primary_actor})"
             else:
                 inc_title = f"{comp_alerts[0].title} ({primary_actor})"
 
+            first = min(comp_alerts, key=lambda a: (a.timestamp, a.alert_id))
             incidents.append(
                 Incident(
-                    incident_id=f"INC-{idx:04d}",
+                    incident_id="INC-" + hashlib.sha256(first.alert_id.encode()).hexdigest()[:10].upper(),
                     title=inc_title,
                     severity=sev,
                     risk_score=score,
@@ -366,9 +380,30 @@ class Correlator:
             )
 
         incidents.sort(key=lambda inc: (-inc.risk_score, inc.created_at))
-        for new_idx, inc in enumerate(incidents, start=1):
-            inc.incident_id = f"INC-{new_idx:04d}"
+        if previous:
+            self._carry_over(incidents, previous)
         return incidents
+
+    @staticmethod
+    def _carry_over(incidents: list[Incident], previous: dict[str, Incident]) -> None:
+        """Keep the ID, status and feedback of the earlier incident that shares the most alerts,
+        so approvals, reports and analyst verdicts stay attached to the right case."""
+        claimed: set[str] = set()
+        for inc in incidents:
+            alert_ids = set(inc.alert_ids)
+            best = max(
+                (p for p in previous.values() if p.incident_id not in claimed and alert_ids & set(p.alert_ids)),
+                key=lambda p: (len(alert_ids & set(p.alert_ids)), -p.created_at),
+                default=None,
+            )
+            if best is None:
+                continue
+            claimed.add(best.incident_id)
+            inc.incident_id = best.incident_id
+            inc.feedback = list(best.feedback)
+            grew = not alert_ids <= set(best.alert_ids)
+            # new alerts reopen a case that was closed as a false positive
+            inc.status = "open" if grew and best.status == "false_positive" else best.status
 
     def record_feedback(
         self,

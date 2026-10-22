@@ -262,22 +262,12 @@ class StateStore:
             self.conn.commit()
 
     def save_incident(self, inc: Incident) -> None:
-        with self._lock:
-            self.conn.execute(
-                "INSERT OR REPLACE INTO incidents VALUES (?, ?, ?, ?, ?, ?)",
-                (
-                    inc.incident_id,
-                    inc.risk_score,
-                    inc.severity,
-                    inc.status,
-                    inc.created_at,
-                    json.dumps(inc.to_dict(), default=str),
-                ),
-            )
-            self.conn.commit()
+        self.save_incidents([inc])
 
-    def save_incidents(self, incidents: list[Incident]) -> None:
+    def save_incidents(self, incidents: list[Incident], replace_all: bool = False) -> None:
         with self._lock:
+            if replace_all:
+                self.conn.execute("DELETE FROM incidents")
             self.conn.executemany(
                 "INSERT OR REPLACE INTO incidents VALUES (?, ?, ?, ?, ?, ?)",
                 [
@@ -293,6 +283,11 @@ class StateStore:
                 ],
             )
             self.conn.commit()
+
+    def replace_incidents(self, incidents: list[Incident]) -> None:
+        """Make the stored set match the current correlation, so an incident that was merged
+        into another one does not linger as a stale duplicate."""
+        self.save_incidents(incidents, replace_all=True)
 
     def list_incidents(self) -> list[dict[str, Any]]:
         with self._lock:
@@ -343,6 +338,10 @@ class StateStore:
                     "SELECT payload_json FROM approvals ORDER BY created_at ASC"
                 ).fetchall()
         return [json.loads(r[0]) for r in rows]
+
+    def rule_weights(self) -> dict[str, float]:
+        with self._lock:
+            return dict(self.conn.execute("SELECT rule_id, weight FROM rule_weights").fetchall())
 
     def save_feedback(self, incident_id: str, verdict: str, reason: str, analyst: str, ts: float, payload: dict[str, Any]) -> None:
         with self._lock:
