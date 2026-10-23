@@ -5,6 +5,7 @@
     python -m soccopilot ingest path/to/events.jsonl [--source wazuh|ecs|cloudtrail|auth|api_gateway|payments]
     python -m soccopilot triage [INCIDENT_ID] [--live]
     python -m soccopilot serve [--port 8011] [--host 127.0.0.1]
+    python -m soccopilot realdata --flaws flaws_cloudtrail_logs/ [--otrf ec2_proxy_s3_exfiltration.json] [--honeybucket AWS_S3_HoneyBucketLogs.csv]
 """
 from __future__ import annotations
 
@@ -40,6 +41,13 @@ def main(argv: list[str] | None = None) -> None:
     sv_p = sub.add_parser("serve", help="start FastAPI server + Analyst Console UI")
     sv_p.add_argument("--port", type=int, default=8011)
     sv_p.add_argument("--host", default="127.0.0.1")
+
+    rd_p = sub.add_parser("realdata", help="replay real CloudTrail logs and report alert volume and speed")
+    rd_p.add_argument("--flaws", help="folder of flaws.cloud flaws_cloudtrail*.json.gz files")
+    rd_p.add_argument("--otrf", help="OTRF ec2_proxy_s3_exfiltration JSON lines file")
+    rd_p.add_argument("--honeybucket", help="OTRF AWS_S3_HoneyBucketLogs.csv")
+    rd_p.add_argument("--limit", type=int, default=100_000, help="flaws.cloud events to replay")
+    rd_p.add_argument("--json", default="results/real_data.json")
 
     args = ap.parse_args(argv)
 
@@ -107,6 +115,15 @@ def main(argv: list[str] | None = None) -> None:
         print("\nRecommended Containment (Pending Analyst Approval):")
         for r in rep.recommended_containment:
             print(f"  - {r['action_type']} -> {r['target']}: {r['rationale']}")
+
+    elif args.cmd == "realdata":
+        from .realdata import main as realdata
+
+        res = realdata(args.flaws, args.otrf, args.honeybucket, args.limit, args.json)
+        for name, r in res.items():
+            print(f"{name}: {r['events']} events at {r['events_per_second']}/s -> {r['alerts']} alerts "
+                  f"({r['alerts_per_10k_events']} per 10k), {r['incidents']} incidents")
+            print(f"  by rule: {r['alerts_by_rule']}  suppressed repeats: {r['repeats_suppressed']}")
 
     elif args.cmd == "serve":
         import uvicorn

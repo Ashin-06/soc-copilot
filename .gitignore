@@ -3,5 +3,6 @@ __pycache__/
 .pytest_cache/
 .benchmarks/
 data/
-results/
+results/*
+!results/real_data.json
 .env

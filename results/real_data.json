@@ -1,0 +1,145 @@
+{
+  "flaws_cloudtrail": {
+    "dataset": "flaws.cloud CloudTrail (real, unlabelled)",
+    "events": 100000,
+    "events_stored": 99857,
+    "seconds": 27.2,
+    "events_per_second": 3670,
+    "alerts": 130,
+    "alerts_per_10k_events": 13.0,
+    "alerts_by_rule": {
+      "SIGMA-BANK-012": 81,
+      "SIGMA-BANK-005": 26,
+      "SIGMA-BANK-006": 22,
+      "SIGMA-BANK-011": 1
+    },
+    "repeats_suppressed": {
+      "SIGMA-BANK-011": 4468
+    },
+    "incidents": 32,
+    "top_incidents": [
+      {
+        "title": "CloudTrail Access Key or Policy Persistence \u2192 CloudTrail S3 Bucket Policy Weakening or Bulk KYC Vault Exfiltration (811596193553)",
+        "risk": 96.7,
+        "alerts": 6,
+        "tactics": [
+          "persistence",
+          "privilege_escalation",
+          "collection",
+          "exfiltration"
+        ]
+      },
+      {
+        "title": "CloudTrail S3 Bucket Policy Weakening or Bulk KYC Vault Exfiltration \u2192 CloudTrail S3 Bucket Policy Weakening or Bulk KYC Vault Exfiltration (811596193553)",
+        "risk": 84.8,
+        "alerts": 13,
+        "tactics": [
+          "collection",
+          "exfiltration"
+        ]
+      },
+      {
+        "title": "CloudTrail S3 Bucket Policy Weakening or Bulk KYC Vault Exfiltration \u2192 CloudTrail S3 Bucket Policy Weakening or Bulk KYC Vault Exfiltration (811596193553)",
+        "risk": 78.9,
+        "alerts": 3,
+        "tactics": [
+          "collection",
+          "exfiltration"
+        ]
+      },
+      {
+        "title": "CloudTrail S3 Bucket Policy Weakening or Bulk KYC Vault Exfiltration \u2192 CloudTrail S3 Bucket Policy Weakening or Bulk KYC Vault Exfiltration (811596193553)",
+        "risk": 77.3,
+        "alerts": 2,
+        "tactics": [
+          "collection",
+          "exfiltration"
+        ]
+      },
+      {
+        "title": "CloudTrail Access Key or Policy Persistence \u2192 CloudTrail Burst of Access-Denied Calls (811596193553)",
+        "risk": 75.2,
+        "alerts": 6,
+        "tactics": [
+          "persistence",
+          "privilege_escalation",
+          "discovery"
+        ]
+      }
+    ]
+  },
+  "otrf_s3_exfiltration": {
+    "events": 103,
+    "events_stored": 103,
+    "seconds": 0.2,
+    "events_per_second": 606,
+    "alerts": 0,
+    "alerts_per_10k_events": 0.0,
+    "alerts_by_rule": {},
+    "repeats_suppressed": {},
+    "incidents": 0,
+    "top_incidents": [],
+    "dataset": "OTRF ec2_proxy_s3_exfiltration (recorded attack)",
+    "detected": false
+  },
+  "otrf_s3_honeybucket": {
+    "events": 301,
+    "events_stored": 301,
+    "seconds": 0.2,
+    "events_per_second": 1579,
+    "alerts": 216,
+    "alerts_per_10k_events": 7176.1,
+    "alerts_by_rule": {
+      "SIGMA-BANK-013": 216
+    },
+    "repeats_suppressed": {
+      "SIGMA-BANK-013": 68
+    },
+    "incidents": 216,
+    "top_incidents": [
+      {
+        "title": "CloudTrail Unauthenticated S3 Bucket Probing (541646178081)",
+        "risk": 39.0,
+        "alerts": 1,
+        "tactics": [
+          "discovery"
+        ]
+      },
+      {
+        "title": "CloudTrail Unauthenticated S3 Bucket Probing (103.73.151.226)",
+        "risk": 39.0,
+        "alerts": 1,
+        "tactics": [
+          "discovery"
+        ]
+      },
+      {
+        "title": "CloudTrail Unauthenticated S3 Bucket Probing (95.217.6.207)",
+        "risk": 39.0,
+        "alerts": 1,
+        "tactics": [
+          "discovery"
+        ]
+      },
+      {
+        "title": "CloudTrail Unauthenticated S3 Bucket Probing (451083579297)",
+        "risk": 39.0,
+        "alerts": 1,
+        "tactics": [
+          "discovery"
+        ]
+      },
+      {
+        "title": "CloudTrail Unauthenticated S3 Bucket Probing (161.35.201.205)",
+        "risk": 39.0,
+        "alerts": 1,
+        "tactics": [
+          "discovery"
+        ]
+      }
+    ],
+    "dataset": "OTRF aws_s3_honeybucketlogs (every request is a probe)",
+    "probes": 301,
+    "anonymous_probes": 284
+  }
+}
