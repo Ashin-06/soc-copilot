@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 import duckdb
+import pandas as pd
 
 from .correlate import Incident
 from .normalize import NormalizedEvent
@@ -115,15 +116,14 @@ class EventStore:
             )
             for ev in events
         ]
+        # one bulk insert from a DataFrame: executemany binds row by row and took ~170 s per 5,000 events
+        batch = pd.DataFrame(rows, columns=list(COLUMNS)).astype({"bytes_out": "int64", "amount": "float64", "timestamp": "float64"})
         with self._lock:
-            self.conn.executemany(
-                """
-                INSERT OR REPLACE INTO normalized_events VALUES (
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-                )
-                """,
-                rows,
-            )
+            self.conn.register("_batch", batch)
+            try:
+                self.conn.execute(f"INSERT OR REPLACE INTO normalized_events SELECT {', '.join(COLUMNS)} FROM _batch")
+            finally:
+                self.conn.unregister("_batch")
             for ev in events:
                 self._cache[ev.event_id] = ev
         return len(events)
