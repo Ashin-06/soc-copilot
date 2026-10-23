@@ -16,6 +16,12 @@ def test_timestamps_reject_garbage_and_accept_epoch_millis():
             parse_timestamp(bad)
 
 
+def test_cloudtrail_shipped_through_logstash_is_accepted():
+    v = EventValidator()
+    src, _, ts = v.validate({"@timestamp": "2025-10-21T09:30:00.000Z", "eventName": "ListBuckets", "eventSource": "s3.amazonaws.com"})
+    assert src == "cloudtrail" and ts == pytest.approx(BASE_TS)
+
+
 def test_bad_values_are_rejected_not_crashing():
     svc = IngestService()
     far_future = {"source_type": "auth", "ts": 4102444800, "action": "login_success"}

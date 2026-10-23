@@ -201,6 +201,8 @@ class EventValidator:
             return raw["source_type"]
         if "eventTime" in raw and ("eventName" in raw or "eventSource" in raw):
             return "cloudtrail"
+        if "@timestamp" in raw and "eventName" in raw and "eventSource" in raw:
+            return "cloudtrail"  # shipped through Logstash
         if "@timestamp" in raw and "event" in raw:
             return "ecs"
         if "rule" in raw and ("agent" in raw or "full_log" in raw or "data" in raw):
@@ -233,6 +235,8 @@ class EventValidator:
         src = source or self.detect_source(raw)
         if src not in self.REQUIRED_FIELDS:
             raise IngestValidationError(f"unsupported source '{src}'")
+        if src == "cloudtrail" and raw.get("eventTime") is None and raw.get("@timestamp") is not None:
+            raw = {**raw, "eventTime": raw["@timestamp"]}  # Logstash's cloudtrail codec moves eventTime to @timestamp
         for req in self.REQUIRED_FIELDS[src]:
             if req not in raw or raw[req] is None:
                 raise IngestValidationError(f"source '{src}' missing required field '{req}'")
