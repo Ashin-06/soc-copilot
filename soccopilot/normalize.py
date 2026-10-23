@@ -200,6 +200,9 @@ def normalize_envelope(env: IngestedEnvelope) -> NormalizedEvent:
             "requestParameters": req,
             "responseElements": resp,
             "errorCode": _s(raw.get("errorCode")),
+            "identity_type": _s(ident.get("type")),  # IAMUser, AssumedRole, AWSService, Root ...
+            "account_id": _s(ident.get("accountId")),  # ANONYMOUS_PRINCIPAL for unauthenticated S3 requests
+            "invoked_by": _s(ident.get("invokedBy")),
         }
 
     elif src == "auth":

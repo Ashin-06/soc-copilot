@@ -1,7 +1,7 @@
-title: CloudTrail Production Admin Role Assumption or Access Key Persistence
+title: CloudTrail Access Key or Policy Persistence
 id: SIGMA-BANK-005
 status: stable
-description: Detects AWS IAM privilege escalation via AssumeRole or persistent access key creation.
+description: Detects persistence through new IAM access keys, console passwords or directly attached policies.
 logsource:
   category: iam
   service: cloudtrail
@@ -13,9 +13,12 @@ detection:
   selection:
     source: cloudtrail
     event_action:
-      - AssumeRole
       - CreateAccessKey
       - AttachUserPolicy
+      - PutUserPolicy
+      - AttachRolePolicy
+      - CreateLoginProfile
+      - UpdateLoginProfile
     event_outcome: success
   filter:
     user: svc-backup-nightly

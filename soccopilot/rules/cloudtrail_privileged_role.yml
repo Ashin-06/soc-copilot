@@ -1,0 +1,30 @@
+title: CloudTrail Privileged Role Assumed by a Person
+id: SIGMA-BANK-011
+status: stable
+description: >
+  AssumeRole into a role whose name marks it as admin, production, security, owner or
+  break-glass, made by a user rather than an AWS service. Service-to-service AssumeRole
+  (EC2, Lambda, Config) is routine and was most of the volume in real CloudTrail.
+logsource:
+  category: iam
+  service: cloudtrail
+tags:
+  - attack.privilege_escalation
+  - attack.t1078.004
+detection:
+  selection:
+    source: cloudtrail
+    event_action: AssumeRole
+    event_outcome: success
+    details.requestParameters.roleArn|re: '(?i)(admin|prod|break.?glass|security|owner|root)'
+  filter:
+    details.identity_type: AWSService
+  condition: selection and not filter
+# one alert per user and role per day: in real CloudTrail a single audit scanner made 4,469
+# identical AssumeRole calls in 17 hours
+suppression:
+  by: [user, details.requestParameters.roleArn]
+  for: 1d
+level: high
+falsepositives:
+  - Engineers on call assuming production roles through an approved process

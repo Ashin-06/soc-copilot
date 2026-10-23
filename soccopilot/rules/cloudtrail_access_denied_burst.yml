@@ -1,0 +1,20 @@
+title: CloudTrail Burst of Access-Denied Calls
+id: SIGMA-BANK-012
+status: stable
+description: 20 or more denied AWS API calls by the same identity within 10 minutes, typical of someone enumerating with stolen or leaked keys.
+logsource:
+  category: iam
+  service: cloudtrail
+tags:
+  - attack.discovery
+  - attack.t1580
+detection:
+  selection:
+    source: cloudtrail
+    event_outcome: failure
+    details.errorCode|re: '(?i)(accessdenied|unauthorized)'
+  timeframe: 10m
+  condition: selection | count() by user >= 20
+level: medium
+falsepositives:
+  - A misconfigured deployment retrying with insufficient permissions

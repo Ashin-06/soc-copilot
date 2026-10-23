@@ -179,6 +179,8 @@ class SigmaRule:
     agg_group_by: str | None
     agg_op: str | None
     agg_threshold: int | None
+    suppress_by: tuple[str, ...] = ()
+    suppress_s: float = 0.0
 
     @classmethod
     def from_yaml(cls, data: dict[str, Any]) -> "SigmaRule":
@@ -212,6 +214,16 @@ class SigmaRule:
             raise RuleError("count() aggregation and timeframe must be used together")
         if m["by"]:
             _check_field(m["by"])
+        # suppression: one alert per key per window, e.g. a scanner assuming the same role every five minutes
+        sup = data.get("suppression")
+        if sup is not None:
+            if not isinstance(sup, dict) or "by" not in sup or "for" not in sup:
+                raise RuleError("suppression needs 'by' and 'for'")
+            if m["by"]:
+                raise RuleError("suppression applies to single-event rules; count() rules already fire once per window")
+            suppress_by = tuple(str(f) for f in (sup["by"] if isinstance(sup["by"], list) else [sup["by"]]))
+            for f in suppress_by:
+                _check_field(f)
 
         return cls(
             id=str(data["id"]),
@@ -228,6 +240,8 @@ class SigmaRule:
             agg_group_by=m["by"],
             agg_op=m["op"],
             agg_threshold=int(m["n"]) if m["n"] else None,
+            suppress_by=suppress_by if sup is not None else (),
+            suppress_s=_parse_timeframe(sup["for"]) if sup is not None else 0.0,
         )
 
     def matches_event(self, ev: NormalizedEvent) -> bool:
@@ -410,6 +424,9 @@ class DetectionEngine:
         self._timeframes = {r.id: r.timeframe_s for r in self.rules if r.timeframe_s}
         self._window_buffers: dict[tuple[str, str], list[NormalizedEvent]] = defaultdict(list)
         self._window_fired: set[tuple[str, str, int]] = set()
+        self._suppress_s = {r.id: r.suppress_s for r in self.rules if r.suppress_s}
+        self._last_fired: dict[tuple[str, ...], float] = {}
+        self.suppressed: dict[str, int] = defaultdict(int)  # rule id -> repeat matches folded into an earlier alert
         self._evaluated = 0
 
     def _load_rules(self) -> list[SigmaRule]:
@@ -429,6 +446,8 @@ class DetectionEngine:
     def reset(self) -> None:
         self._window_buffers.clear()
         self._window_fired.clear()
+        self._last_fired.clear()
+        self.suppressed.clear()
         self._evaluated = 0
 
     def _sweep(self, now: float) -> None:
@@ -436,6 +455,7 @@ class DetectionEngine:
         for key in [k for k, buf in self._window_buffers.items() if not buf or buf[-1].timestamp < now - self._timeframes[k[0]]]:
             del self._window_buffers[key]
         self._window_fired = {k for k in self._window_fired if k[2] >= int(now // self._timeframes[k[0]]) - 1}
+        self._last_fired = {k: t for k, t in self._last_fired.items() if t >= now - self._suppress_s[k[0]]}
 
     def evaluate_event(self, ev: NormalizedEvent) -> list[Alert]:
         self._evaluated += 1
@@ -489,6 +509,13 @@ class DetectionEngine:
                         )
                     )
             else:
+                if rule.suppress_s:
+                    skey = (rule.id, *(str(_get_field(ev, f)) for f in rule.suppress_by))
+                    last = self._last_fired.get(skey)
+                    if last is not None and ev.timestamp - last < rule.suppress_s:
+                        self.suppressed[rule.id] += 1
+                        continue
+                    self._last_fired[skey] = ev.timestamp
                 money = ev.amount if ev.event_category == "payment" else 0.0
                 out.append(
                     Alert(

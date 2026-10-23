@@ -1,0 +1,33 @@
+title: CloudTrail Unauthenticated S3 Bucket Probing
+id: SIGMA-BANK-013
+status: experimental
+description: >
+  An anonymous (unsigned) request that checks whether a bucket exists or lists it. Internet
+  scanners guess bucket names all day; if the bucket answers, it is publicly readable. Object
+  downloads (GetObject) are left out because public website assets are fetched this way.
+  Needs S3 data events in CloudTrail.
+logsource:
+  category: storage
+  service: cloudtrail
+tags:
+  - attack.discovery
+  - attack.t1619
+detection:
+  selection:
+    source: cloudtrail
+    details.eventSource: s3.amazonaws.com
+    details.account_id: ANONYMOUS_PRINCIPAL
+    event_action:
+      - HeadBucket
+      - ListObjects
+      - ListObjectsV2
+      - GetBucketAcl
+      - GetBucketPolicy
+      - GetBucketLocation
+  condition: selection
+suppression:
+  by: [source_ip, details.requestParameters.bucketName]
+  for: 1d
+level: medium
+falsepositives:
+  - Buckets that are meant to be public, such as static websites (add a filter on their names)
