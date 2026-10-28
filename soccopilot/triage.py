@@ -1,4 +1,4 @@
-"""Stage 6 AI Triage: Read-only Claude tool-use loop with Project 10 privacy gateway
+"""Stage 6 AI Triage: Read-only LLM tool-use loop with Project 10 privacy gateway
 sanitisation and a deterministic evidence-citing template report fallback.
 """
 from __future__ import annotations
@@ -200,7 +200,7 @@ class PrivacyBridge:
 @dataclass
 class TriageReport:
     incident_id: str
-    generated_by: str                   # "claude_tool_loop" | "template_fallback"
+    generated_by: str                   # "llm_tool_loop" | "template_fallback"
     summary: str
     timeline: list[str]
     attack_mapping: list[dict[str, str]]
@@ -358,7 +358,7 @@ def derive_recommended_actions(
 
 
 class TriageEngine:
-    """Runs read-only investigation tool calls (via Claude or deterministic template fallback),
+    """Runs read-only investigation tool calls (via the LLM or a deterministic template fallback),
     enforces Project 10 privacy gateway scrubbing, and queues recommended playbooks for approval.
     """
 
@@ -649,7 +649,7 @@ class TriageEngine:
                 confidence = str(parsed.get("confidence", "medium")).lower()
                 report = TriageReport(
                     incident_id=inc_id,
-                    generated_by="claude_tool_loop",
+                    generated_by="llm_tool_loop",
                     summary=summary,
                     timeline=timeline,
                     attack_mapping=mapping,

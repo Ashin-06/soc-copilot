@@ -120,12 +120,12 @@ def test_triage_enforces_readonly_tools_and_privacy_gateway_masking():
     assert "ABCPD4412K" not in rep.sanitized_prompt_preview
     assert sum(rep.privacy_masked_counts.values()) > 0
 
-    # Guardrail 3: Live Claude tool loop receives only sanitized tool outputs and restores tokens
+    # Guardrail 3: Live LLM tool loop receives only sanitized tool outputs and restores tokens
     class _Block:
         def __init__(self, **kw):
             self.__dict__.update(kw)
 
-    class _FakeClaudeMessages:
+    class _FakeLLMMessages:
         def __init__(self):
             self.calls = 0
 
@@ -152,9 +152,9 @@ def test_triage_enforces_readonly_tools_and_privacy_gateway_masking():
             }
             return _Block(stop_reason="end_turn", content=[_Block(type="text", text=json.dumps(payload))])
 
-    fake_client = SimpleNamespace(messages=_FakeClaudeMessages())
+    fake_client = SimpleNamespace(messages=_FakeLLMMessages())
     llm_rep = cp.triage_engine.triage_incident(inc, client=fake_client, use_llm=True)
-    assert llm_rep.generated_by == "claude_tool_loop"
+    assert llm_rep.generated_by == "llm_tool_loop"
     assert llm_rep.citation_coverage == 1.0
     assert "50100984512011" in llm_rep.summary  # Restored for fraud_analyst role
 
