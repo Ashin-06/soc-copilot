@@ -6,3 +6,4 @@ data/
 results/*
 !results/real_data.json
 .env
+.coverage
