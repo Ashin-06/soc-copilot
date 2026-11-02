@@ -4,13 +4,15 @@
     python -m soccopilot evaluate --labelled my_events.jsonl
     python -m soccopilot ingest path/to/events.jsonl [--source wazuh|ecs|cloudtrail|auth|api_gateway|payments]
     python -m soccopilot triage [INCIDENT_ID] [--live]
-    python -m soccopilot serve [--port 8011] [--host 127.0.0.1]
+    python -m soccopilot serve [--port 8011] [--host 127.0.0.1]     # settings: SOCCOPILOT_* env
+    python -m soccopilot migrate                                     # apply case-database migrations
     python -m soccopilot realdata --flaws flaws_cloudtrail_logs/ [--otrf ec2_proxy_s3_exfiltration.json] [--honeybucket AWS_S3_HoneyBucketLogs.csv]
 """
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -36,11 +38,12 @@ def main(argv: list[str] | None = None) -> None:
 
     tr_p = sub.add_parser("triage", help="triage a correlated incident from the demo queue")
     tr_p.add_argument("incident_id", nargs="?", help="defaults to the highest-risk incident")
-    tr_p.add_argument("--live", action="store_true", help="run live Claude tool-use loop if ANTHROPIC_API_KEY is set")
+    tr_p.add_argument("--live", action="store_true", help="run the live LLM tool-use loop if ANTHROPIC_API_KEY is set")
 
     sv_p = sub.add_parser("serve", help="start FastAPI server + Analyst Console UI")
-    sv_p.add_argument("--port", type=int, default=8011)
-    sv_p.add_argument("--host", default="127.0.0.1")
+    sv_p.add_argument("--port", type=int, help="default SOCCOPILOT_PORT or 8011")
+    sv_p.add_argument("--host", help="default SOCCOPILOT_HOST or 127.0.0.1; any other address needs API keys")
+    sub.add_parser("migrate", help="apply case-database migrations to SOCCOPILOT_DATABASE_URL")
 
     rd_p = sub.add_parser("realdata", help="replay real CloudTrail logs and report alert volume and speed")
     rd_p.add_argument("--flaws", help="folder of flaws.cloud flaws_cloudtrail*.json.gz files")
@@ -125,10 +128,25 @@ def main(argv: list[str] | None = None) -> None:
                   f"({r['alerts_per_10k_events']} per 10k), {r['incidents']} incidents")
             print(f"  by rule: {r['alerts_by_rule']}  suppressed repeats: {r['repeats_suppressed']}")
 
+    elif args.cmd == "migrate":
+        from . import db, ops
+
+        applied = db.migrate(db.engine(ops.load_settings().database_url))
+        print(*(applied or ["up to date"]), sep=chr(10))
     elif args.cmd == "serve":
         import uvicorn
 
-        uvicorn.run("soccopilot.api:app", host=args.host, port=args.port)
+        from . import ops
+
+        for name, val in (("HOST", args.host), ("PORT", args.port)):
+            if val is not None:
+                os.environ[f"SOCCOPILOT_{name}"] = str(val)
+        try:
+            settings = ops.load_settings()  # fail here, before uvicorn, with a readable message
+            ops.setup_logging(settings.log_level)
+            uvicorn.run("soccopilot.api:app", host=settings.host, port=settings.port, log_config=None, access_log=False)
+        except ops.ConfigError as e:
+            sys.exit(f"configuration error: {e}")
 
 
 if __name__ == "__main__":

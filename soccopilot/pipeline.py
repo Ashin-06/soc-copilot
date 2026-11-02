@@ -34,13 +34,14 @@ class SOCCopilot:
         sqlite_path: str | Path | None = None,
         audit_path: str | Path | None = None,
         audit_key: bytes | str | None = None,
+        audit_previous_keys: tuple[bytes, ...] = (),
         policy_path: str | Path | None = None,
         context_path: str | Path | None = None,
     ):
         self.policy = load_policy(policy_path)
         self.context_path = context_path or os.environ.get("SOCCOPILOT_CONTEXT")
         tri, pb = self.policy.get("triage", {}), self.policy.get("playbooks", {})
-        self.audit = AuditLog(path=audit_path, key=audit_key)
+        self.audit = AuditLog(path=audit_path, key=audit_key, previous_keys=audit_previous_keys)
         self.event_store = EventStore(path=duckdb_path)
         self.state_store = StateStore(path=sqlite_path)
         self.ingest_service = self._new_ingest()

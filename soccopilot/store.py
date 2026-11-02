@@ -1,18 +1,19 @@
 """Storage layer:
 - Normalised events -> DuckDB (`EventStore`) for fast analytical log search & entity timelines
-- Incidents, approvals, reports, feedback -> SQLite (`StateStore`)
+- Incidents, approvals, reports, feedback -> SQLite or Postgres (`StateStore`, db.py, migrations/)
 """
 from __future__ import annotations
 
 import json
-import sqlite3
 import threading
 from pathlib import Path
 from typing import Any
 
 import duckdb
 import pandas as pd
+from sqlalchemy import text
 
+from . import db
 from .correlate import Incident
 from .normalize import NormalizedEvent
 
@@ -44,9 +45,10 @@ class EventStore:
         self.conn = duckdb.connect(self.path)
         self._init_schema()
         # ponytail: whole event set in memory; page from DuckDB once it outgrows RAM
+        # (the SQL below only interpolates the COLUMNS constant)
         self._cache: dict[str, NormalizedEvent] = {
             r[0]: _row_to_event(r)
-            for r in self.conn.execute(f"SELECT {', '.join(COLUMNS)} FROM normalized_events").fetchall()
+            for r in self.conn.execute(f"SELECT {', '.join(COLUMNS)} FROM normalized_events").fetchall()  # nosec B608
         }
 
     def _init_schema(self) -> None:
@@ -78,11 +80,11 @@ class EventStore:
                 details_json VARCHAR
             )
             """
-        )
+        ).fetchall()
 
     def clear(self) -> None:
         with self._lock:
-            self.conn.execute("DELETE FROM normalized_events")
+            self.conn.execute("DELETE FROM normalized_events").fetchall()
             self._cache.clear()
 
     def insert_many(self, events: list[NormalizedEvent]) -> int:
@@ -121,7 +123,8 @@ class EventStore:
         with self._lock:
             self.conn.register("_batch", batch)
             try:
-                self.conn.execute(f"INSERT OR REPLACE INTO normalized_events SELECT {', '.join(COLUMNS)} FROM _batch")
+                # consume the result: DuckDB 2 refuses register/unregister while one is pending
+                self.conn.execute(f"INSERT OR REPLACE INTO normalized_events SELECT {', '.join(COLUMNS)} FROM _batch").fetchall()  # nosec B608
             finally:
                 self.conn.unregister("_batch")
             for ev in events:
@@ -136,8 +139,9 @@ class EventStore:
 
     def count(self) -> int:
         with self._lock:
-            row = self.conn.execute("SELECT COUNT(*) FROM normalized_events").fetchone()
-            return int(row[0]) if row else 0
+            # fetchall, not fetchone: DuckDB 2 keeps a result open until a fetch comes back empty
+            rows = self.conn.execute("SELECT COUNT(*) FROM normalized_events").fetchall()
+            return int(rows[0][0]) if rows else 0
 
     def search_logs(
         self,
@@ -161,8 +165,9 @@ class EventStore:
             clauses.append("LOWER(event_category) = ?")
             params.append(category.lower())
 
+        # clauses are fixed templates; every value is a bound ? parameter
         sql = (
-            "SELECT event_id, iso_timestamp, source, event_category, event_action, event_outcome, "
+            "SELECT event_id, iso_timestamp, source, event_category, event_action, event_outcome, "  # nosec B608
             "username, customer_id, source_ip, host, account, amount, message "
             f"FROM normalized_events WHERE {' AND '.join(clauses)} "
             f"ORDER BY timestamp ASC LIMIT {int(max(1, min(limit, 200)))}"
@@ -199,90 +204,39 @@ class EventStore:
 
 
 class StateStore:
-    """SQLite store for incidents, triage reports, playbook approvals, and analyst feedback."""
+    """Incidents, triage reports, playbook approvals and analyst feedback in SQLite or Postgres.
+
+    `path` is a database URL, a SQLite file path, or None for an in-memory database."""
 
     def __init__(self, path: str | Path | None = None):
-        self.path = str(path) if path else ":memory:"
+        url = "sqlite://" if path is None else str(path) if "://" in str(path) else f"sqlite:///{Path(path).as_posix()}"
+        self.db = db.connect(url)
         self._lock = threading.Lock()
-        self.conn = sqlite3.connect(self.path, check_same_thread=False)
-        self._init_schema()
 
-    def _init_schema(self) -> None:
-        with self._lock:
-            self.conn.executescript(
-                """
-                CREATE TABLE IF NOT EXISTS incidents (
-                    incident_id TEXT PRIMARY KEY,
-                    risk_score REAL,
-                    severity TEXT,
-                    status TEXT,
-                    created_at REAL,
-                    payload_json TEXT
-                );
-                CREATE TABLE IF NOT EXISTS reports (
-                    incident_id TEXT PRIMARY KEY,
-                    created_at REAL,
-                    payload_json TEXT
-                );
-                CREATE TABLE IF NOT EXISTS approvals (
-                    action_id TEXT PRIMARY KEY,
-                    incident_id TEXT,
-                    status TEXT,
-                    created_at REAL,
-                    payload_json TEXT
-                );
-                CREATE TABLE IF NOT EXISTS feedback (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    incident_id TEXT,
-                    verdict TEXT,
-                    reason TEXT,
-                    analyst TEXT,
-                    created_at REAL,
-                    payload_json TEXT
-                );
-                CREATE TABLE IF NOT EXISTS rule_weights (
-                    rule_id TEXT PRIMARY KEY,
-                    weight REAL
-                );
-                """
-            )
-            self.conn.commit()
+    def _run(self, *statements: tuple[str, Any]) -> None:
+        with self._lock, self.db.begin() as c:
+            for sql, params in statements:
+                c.execute(text(sql), params)
+
+    def _rows(self, sql: str, params: dict | None = None) -> list[tuple]:
+        with self._lock, self.db.connect() as c:
+            return [tuple(r) for r in c.execute(text(sql), params or {})]
 
     def clear(self) -> None:
-        with self._lock:
-            self.conn.executescript(
-                """
-                DELETE FROM incidents;
-                DELETE FROM reports;
-                DELETE FROM approvals;
-                DELETE FROM feedback;
-                DELETE FROM rule_weights;
-                """
-            )
-            self.conn.commit()
+        self._run(("DELETE FROM incidents", {}), ("DELETE FROM reports", {}), ("DELETE FROM approvals", {}),
+                  ("DELETE FROM feedback", {}), ("DELETE FROM rule_weights", {}))
 
     def save_incident(self, inc: Incident) -> None:
         self.save_incidents([inc])
 
     def save_incidents(self, incidents: list[Incident], replace_all: bool = False) -> None:
-        with self._lock:
-            if replace_all:
-                self.conn.execute("DELETE FROM incidents")
-            self.conn.executemany(
-                "INSERT OR REPLACE INTO incidents VALUES (?, ?, ?, ?, ?, ?)",
-                [
-                    (
-                        inc.incident_id,
-                        inc.risk_score,
-                        inc.severity,
-                        inc.status,
-                        inc.created_at,
-                        json.dumps(inc.to_dict(), default=str),
-                    )
-                    for inc in incidents
-                ],
-            )
-            self.conn.commit()
+        upsert = ("INSERT INTO incidents (incident_id, risk_score, severity, status, created_at, payload_json) "
+                  "VALUES (:id, :risk, :sev, :status, :ts, :payload) ON CONFLICT (incident_id) DO UPDATE SET "
+                  "risk_score = excluded.risk_score, severity = excluded.severity, status = excluded.status, "
+                  "created_at = excluded.created_at, payload_json = excluded.payload_json")
+        self._run(*([("DELETE FROM incidents", {})] if replace_all else []),
+                  *((upsert, {"id": i.incident_id, "risk": i.risk_score, "sev": i.severity, "status": i.status,
+                              "ts": i.created_at, "payload": json.dumps(i.to_dict(), default=str)}) for i in incidents))
 
     def replace_incidents(self, incidents: list[Incident]) -> None:
         """Make the stored set match the current correlation, so an incident that was merged
@@ -290,67 +244,46 @@ class StateStore:
         self.save_incidents(incidents, replace_all=True)
 
     def list_incidents(self) -> list[dict[str, Any]]:
-        with self._lock:
-            rows = self.conn.execute(
-                "SELECT payload_json FROM incidents ORDER BY risk_score DESC, created_at ASC"
-            ).fetchall()
+        rows = self._rows("SELECT payload_json FROM incidents ORDER BY risk_score DESC, created_at ASC")
         return [json.loads(r[0]) for r in rows]
 
     def get_incident(self, incident_id: str) -> dict[str, Any] | None:
-        with self._lock:
-            row = self.conn.execute(
-                "SELECT payload_json FROM incidents WHERE incident_id = ?", (incident_id,)
-            ).fetchone()
-        return json.loads(row[0]) if row else None
+        rows = self._rows("SELECT payload_json FROM incidents WHERE incident_id = :id", {"id": incident_id})
+        return json.loads(rows[0][0]) if rows else None
 
     def save_report(self, incident_id: str, report: dict[str, Any], ts: float) -> None:
-        with self._lock:
-            self.conn.execute(
-                "INSERT OR REPLACE INTO reports VALUES (?, ?, ?)",
-                (incident_id, ts, json.dumps(report, default=str)),
-            )
-            self.conn.commit()
+        self._run(("INSERT INTO reports (incident_id, created_at, payload_json) VALUES (:id, :ts, :payload) "
+                   "ON CONFLICT (incident_id) DO UPDATE SET created_at = excluded.created_at, payload_json = excluded.payload_json",
+                   {"id": incident_id, "ts": ts, "payload": json.dumps(report, default=str)}))
 
     def get_report(self, incident_id: str) -> dict[str, Any] | None:
-        with self._lock:
-            row = self.conn.execute(
-                "SELECT payload_json FROM reports WHERE incident_id = ?", (incident_id,)
-            ).fetchone()
-        return json.loads(row[0]) if row else None
+        rows = self._rows("SELECT payload_json FROM reports WHERE incident_id = :id", {"id": incident_id})
+        return json.loads(rows[0][0]) if rows else None
 
     def save_approval(self, action_id: str, incident_id: str, status: str, created_at: float, payload: dict[str, Any]) -> None:
-        with self._lock:
-            self.conn.execute(
-                "INSERT OR REPLACE INTO approvals VALUES (?, ?, ?, ?, ?)",
-                (action_id, incident_id, status, created_at, json.dumps(payload, default=str)),
-            )
-            self.conn.commit()
+        self._run(("INSERT INTO approvals (action_id, incident_id, status, created_at, payload_json) "
+                   "VALUES (:id, :inc, :status, :ts, :payload) ON CONFLICT (action_id) DO UPDATE SET "
+                   "incident_id = excluded.incident_id, status = excluded.status, created_at = excluded.created_at, "
+                   "payload_json = excluded.payload_json",
+                   {"id": action_id, "inc": incident_id, "status": status, "ts": created_at,
+                    "payload": json.dumps(payload, default=str)}))
 
     def list_approvals(self, incident_id: str | None = None) -> list[dict[str, Any]]:
-        with self._lock:
-            if incident_id:
-                rows = self.conn.execute(
-                    "SELECT payload_json FROM approvals WHERE incident_id = ? ORDER BY created_at ASC",
-                    (incident_id,),
-                ).fetchall()
-            else:
-                rows = self.conn.execute(
-                    "SELECT payload_json FROM approvals ORDER BY created_at ASC"
-                ).fetchall()
+        if incident_id:
+            rows = self._rows("SELECT payload_json FROM approvals WHERE incident_id = :id ORDER BY created_at ASC",
+                              {"id": incident_id})
+        else:
+            rows = self._rows("SELECT payload_json FROM approvals ORDER BY created_at ASC")
         return [json.loads(r[0]) for r in rows]
 
     def rule_weights(self) -> dict[str, float]:
-        with self._lock:
-            return dict(self.conn.execute("SELECT rule_id, weight FROM rule_weights").fetchall())
+        return dict(self._rows("SELECT rule_id, weight FROM rule_weights"))
 
     def save_feedback(self, incident_id: str, verdict: str, reason: str, analyst: str, ts: float, payload: dict[str, Any]) -> None:
-        with self._lock:
-            self.conn.execute(
-                "INSERT INTO feedback (incident_id, verdict, reason, analyst, created_at, payload_json) VALUES (?, ?, ?, ?, ?, ?)",
-                (incident_id, verdict, reason, analyst, ts, json.dumps(payload, default=str)),
-            )
-            for rid, w in payload.get("updated_rule_weights", {}).items():
-                self.conn.execute(
-                    "INSERT OR REPLACE INTO rule_weights VALUES (?, ?)", (rid, float(w))
-                )
-            self.conn.commit()
+        self._run(("INSERT INTO feedback (incident_id, verdict, reason, analyst, created_at, payload_json) "
+                   "VALUES (:id, :verdict, :reason, :analyst, :ts, :payload)",
+                   {"id": incident_id, "verdict": verdict, "reason": reason, "analyst": analyst, "ts": ts,
+                    "payload": json.dumps(payload, default=str)}),
+                  *(("INSERT INTO rule_weights (rule_id, weight) VALUES (:r, :w) "
+                     "ON CONFLICT (rule_id) DO UPDATE SET weight = excluded.weight", {"r": rid, "w": float(w)})
+                    for rid, w in payload.get("updated_rule_weights", {}).items()))

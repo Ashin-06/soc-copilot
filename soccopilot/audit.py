@@ -10,7 +10,6 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
-import os
 import threading
 import time
 from pathlib import Path
@@ -23,10 +22,10 @@ def _canon(obj: dict) -> bytes:
 class AuditLog:
     GENESIS = "0" * 64
 
-    def __init__(self, path: str | Path | None = None, key: bytes | str | None = None):
+    def __init__(self, path: str | Path | None = None, key: bytes | str | None = None, previous_keys: tuple[bytes, ...] = ()):
         self.path = Path(path) if path else None
-        raw_key = key if key is not None else os.environ.get("SOCCOPILOT_AUDIT_KEY")
-        self.key = raw_key.encode("utf-8") if isinstance(raw_key, str) else raw_key
+        self.key = key.encode("utf-8") if isinstance(key, str) else key  # the service passes SOCCOPILOT_AUDIT_KEY
+        self.previous_keys = tuple(previous_keys)  # entries signed before a key rotation still verify
         self._lock = threading.Lock()
         self.entries, problem = self._read()
         if problem:
@@ -46,10 +45,11 @@ class AuditLog:
                 return entries, f"line {i + 1} is not valid JSON"
         return entries, ""
 
-    def _digest(self, body: dict) -> str:
+    def _digest(self, body: dict, key: bytes | None = None) -> str:
         data = _canon(body)
-        if self.key:
-            return hmac.new(self.key, data, hashlib.sha256).hexdigest()
+        key = key or self.key
+        if key:
+            return hmac.new(key, data, hashlib.sha256).hexdigest()
         return hashlib.sha256(data).hexdigest()
 
     RESERVED = ("seq", "ts", "event", "prev", "hash")
@@ -90,8 +90,8 @@ class AuditLog:
                 return False, f"entry {i}: sequence number {e.get('seq')} out of order"
             if e.get("prev") != prev:
                 return False, f"entry {i}: chain broken (previous hash mismatch)"
-            expected = self._digest(json.loads(_canon(body)))
-            if not hmac.compare_digest(expected, str(e.get("hash", ""))):
+            canon = json.loads(_canon(body))
+            if not any(hmac.compare_digest(self._digest(canon, k), str(e.get("hash", ""))) for k in (self.key, *self.previous_keys)):
                 return False, f"entry {i}: contents were modified"
             prev = e["hash"]
         return True, f"{len(entries)} entries, chain intact"

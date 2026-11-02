@@ -41,7 +41,7 @@ def test_state_survives_a_restart(tmp_path):
     inc.status = "contained"
     cp.state_store.save_incident(inc)
     cp.event_store.conn.close()
-    cp.state_store.conn.close()
+    cp.state_store.db.dispose()
 
     again = SOCCopilot(**paths)
     assert list(again.incidents) == [inc.incident_id] and again.incidents[inc.incident_id].status == "contained"

@@ -3,11 +3,13 @@
 Endpoints (permission in brackets):
 - GET  /                         Interactive Analyst Console (web/console.html)
 - GET  /health                   Per-source heartbeat health monitor & storage stats  [read]
+- GET  /healthz, /readyz         Liveness and readiness probes (no key)
+- GET  /metrics                  Prometheus metrics  [metrics]
 - POST /ingest                   Ingest raw event or batch (Wazuh, ECS, CloudTrail, Auth, API, Payments)  [ingest]
 - GET  /incidents                Incident queue ordered by composite risk score  [read]
 - GET  /incidents/{id}           Full incident detail (storyline timeline, entity graph, alerts, actions)  [read]
 - GET  /incidents/{id}/report    Get or generate structured AI triage report (with [EVT-...] citations)  [read]
-- POST /incidents/{id}/report    Run AI triage (Claude tool loop or template fallback)  [triage]
+- POST /incidents/{id}/report    Run AI triage (LLM tool loop or template fallback)  [triage]
 - POST /incidents/{id}/feedback  Record analyst TP/FP verdict and tune detection rule weights  [feedback]
 - GET  /actions                  List pending/decided/executed playbook actions  [read]
 - POST /actions                  Propose a containment playbook action (needs a second analyst to approve)  [propose]
@@ -17,91 +19,55 @@ Endpoints (permission in brackets):
 - POST /reset                    Reset and re-seed demo state (demo data only)  [admin]
 
 Who is calling: set SOCCOPILOT_API_KEYS (JSON) or SOCCOPILOT_KEYS_FILE to
-{"<key>": {"user": "meera", "role": "analyst"}, ...}. The key decides the user and role; any
-"analyst" name in a request body is ignored. Without keys the API runs in demo mode: every
-endpoint is open and the body's analyst name is trusted, which is only fit for a laptop.
+{"sha256:<hex>": {"user": "meera", "role": "analyst"}, ...} (python -m soccopilot.ops keygen).
+The key decides the user and role; any "analyst" name in a request body is ignored. Without
+keys the API runs in demo mode on loopback only: every endpoint is open and the body's analyst
+name is trusted, which is only fit for a laptop.
 
-Where state lives: with SOCCOPILOT_DATA_DIR set, events, cases and the audit log are kept on disk
-there and nothing is seeded. Otherwise the server starts in memory with the demo campaigns loaded.
+Where state lives: with SOCCOPILOT_DATA_DIR set, events (DuckDB) and the audit log are kept on
+disk there, cases in SOCCOPILOT_DATABASE_URL (default: state.db in the same directory), and
+nothing is seeded. Otherwise the server starts in memory with the demo campaigns loaded.
+Settings: see ops.py and docs/runbook.md.
 """
 from __future__ import annotations
 
-import hashlib
-import hmac
-import json
-import os
 import threading
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
+from . import ops
 from .evaluate import run_evaluation, seed_demo_copilot
 from .ingest import IngestValidationError
 from .pipeline import SOCCopilot
 from .triage import check_recommendations
 
 ROOT = Path(__file__).resolve().parent.parent
-ROLE_PERMISSIONS: dict[str, set[str]] = {
-    "ingest": {"ingest"},                                   # log shippers
-    "viewer": {"read"},
-    "analyst": {"read", "ingest", "triage", "feedback", "propose"},
-    "approver": {"read", "triage", "feedback", "propose", "decide"},
-    "admin": {"read", "ingest", "triage", "feedback", "propose", "decide", "admin"},
-}
+settings = ops.load_settings()
+ops.setup_logging(settings.log_level)
+DATA_DIR = settings.data_dir
 
-
-def _load_keys() -> dict[str, dict[str, str]]:
-    """Gateway keys, held only as SHA-256 hashes."""
-    raw = os.environ.get("SOCCOPILOT_API_KEYS")
-    path = os.environ.get("SOCCOPILOT_KEYS_FILE")
-    if path:
-        raw = Path(path).read_text(encoding="utf-8")
-    if not raw:
-        return {}
-    keys = {}
-    for key, ident in json.loads(raw).items():
-        if ident.get("role") not in ROLE_PERMISSIONS or not ident.get("user"):
-            raise ValueError(f"key for {ident.get('user')!r} needs a user and one of the roles {sorted(ROLE_PERMISSIONS)}")
-        keys[hashlib.sha256(key.encode()).hexdigest()] = {"user": str(ident["user"]), "role": ident["role"]}
-    return keys
-
-
-API_KEYS = _load_keys()
-DATA_DIR = os.environ.get("SOCCOPILOT_DATA_DIR")
-
-app = FastAPI(title="SOC Copilot for a Digital Bank", version="1.1.0")
+app = FastAPI(title="SOC Copilot for a Digital Bank", version="1.0.0")
 _lock = threading.Lock()
 
 
 def _start() -> SOCCopilot:
+    keys = {"audit_key": settings.secret["AUDIT_KEY"], "audit_previous_keys": settings.previous["AUDIT_KEY"]}
     if DATA_DIR:
         d = Path(DATA_DIR)
         d.mkdir(parents=True, exist_ok=True)
-        return SOCCopilot(duckdb_path=d / "events.duckdb", sqlite_path=d / "state.db", audit_path=d / "audit.jsonl")
-    return seed_demo_copilot()
+        return SOCCopilot(duckdb_path=d / "events.duckdb", sqlite_path=settings.database_url, audit_path=d / "audit.jsonl", **keys)
+    return seed_demo_copilot(SOCCopilot(**keys))
 
 
 copilot: SOCCopilot = _start()
-
-
-def require(permission: str):
-    def check(request: Request) -> dict[str, str]:
-        if not API_KEYS:
-            return {"user": "", "role": "demo"}
-        key = request.headers.get("x-api-key") or request.headers.get("authorization", "").removeprefix("Bearer ").strip()
-        digest = hashlib.sha256(key.encode()).hexdigest() if key else ""
-        ident = next((v for k, v in API_KEYS.items() if hmac.compare_digest(k, digest)), None)
-        if ident is None:
-            raise HTTPException(401, "missing or unknown API key")
-        if permission not in ROLE_PERMISSIONS[ident["role"]]:
-            raise HTTPException(403, f"role {ident['role']!r} cannot {permission}")
-        return ident
-
-    return check
+ops.install(app, settings, {"database": lambda: copilot.state_store.rule_weights() is not None,
+                            "event_store": lambda: copilot.event_store.count() >= 0})
+require = ops.require
 
 
 def _who(ident: dict[str, str], claimed: str | None) -> str:
@@ -158,7 +124,7 @@ def health_status(ident: dict = Depends(require("read"))):
         ok_chain, chain_msg = copilot.audit.verify()
         return {
             "status": "degraded" if quiet or not ok_chain else "healthy",
-            "auth": "api keys" if API_KEYS else "demo (no keys configured)",
+            "auth": "demo (no keys configured)" if settings.demo else "api keys",
             "storage": "disk" if DATA_DIR else "memory (demo)",
             "privacy": copilot.triage_engine.privacy.mode,
             "events_stored": copilot.event_store.count(),
@@ -249,6 +215,7 @@ def submit_incident_feedback(incident_id: str, body: FeedbackRequest, ident: dic
     with _lock:
         inc = _incident(incident_id)
         fb = copilot.record_feedback(incident_id, body.verdict, body.reason, _who(ident, body.analyst))
+        ops.DECISIONS.labels(decision=body.verdict).inc()
         return {
             "incident_id": incident_id,
             "status": inc.status,
@@ -303,17 +270,18 @@ def decide_action(action_id: str, body: ActionDecisionRequest, ident: dict = Dep
             raise HTTPException(403, str(e)) from e
         except ValueError as e:
             raise HTTPException(409, str(e)) from e
+        ops.DECISIONS.labels(decision=f"action_{act.status}").inc()
         return act.to_dict()
 
 
 @app.get("/audit")
-def get_audit(limit: int = 100, ident: dict = Depends(require("read"))):
+def get_audit(limit: int = Query(100, ge=1), ident: dict = Depends(require("read"))):
     with _lock:
         ok, msg = copilot.audit.verify()
         return {
             "verified": ok,
             "message": msg,
-            "entries": copilot.audit.entries[-min(max(1, limit), 500):],
+            "entries": copilot.audit.entries[-min(limit, 500):],
         }
 
 
