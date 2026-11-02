@@ -48,6 +48,8 @@ python -m soccopilot serve --port 8011   # web console on http://127.0.0.1:8011
 streamlit run app.py                     # Streamlit console
 ```
 
+To build the container image: `docker build -t soc-copilot .` (see [docs/runbook.md](docs/runbook.md)).
+
 ## API and roles
 
 | Endpoint | Roles |
@@ -57,8 +59,10 @@ streamlit run app.py                     # Streamlit console
 | `POST /incidents/{id}/report`, `/incidents/{id}/feedback`, `/actions` | `analyst`, `approver`, `admin` |
 | `POST /actions/{id}/decide` | `approver`, `admin` |
 | `GET /evaluate`, `POST /reset` | `admin` |
+| `GET /healthz`, `/readyz` | open (health and readiness) |
+| `GET /metrics` | `monitor`, `admin` |
 
-Send the key as `x-api-key` or `Authorization: Bearer`. Without keys the API runs in demo mode and every endpoint is open.
+Send the key as `x-api-key` or `Authorization: Bearer`; create keys with `python -m soccopilot.ops keygen`. Without keys the API runs in demo mode, every endpoint is open, and it refuses to listen on anything but loopback.
 
 ## Results
 
@@ -74,8 +78,10 @@ Details are in [docs/evaluation.md](docs/evaluation.md).
 
 | Variable | Purpose |
 |---|---|
+| `SOCCOPILOT_ENV=production` | refuse to start without hashed API keys, a data directory and the audit key |
 | `SOCCOPILOT_API_KEYS` / `SOCCOPILOT_KEYS_FILE` | API keys with the user and role for each, stored as SHA-256 hashes |
 | `SOCCOPILOT_DATA_DIR` | keep events, cases and the audit log on disk |
+| `SOCCOPILOT_DATABASE_URL` | case store: `state.db` in the data directory by default, or `postgresql://...` |
 | `SOCCOPILOT_AUDIT_KEY` | HMAC key for the audit log |
 | `SOCCOPILOT_POLICY` | alternative to `policy.toml`: thresholds, suppressions, scoring weights, model, enabled playbooks |
 | `SOCCOPILOT_CONTEXT` | JSON with your own assets, staff, customers, network ranges and threat intelligence |
@@ -111,6 +117,13 @@ policy.toml
 - Everything runs in one process and each batch re-correlates all alerts, which suits a team's daily volume but not a full SIEM feed.
 - Bulk S3 downloads and stolen instance credentials are not detected in real CloudTrail data yet.
 - The Streamlit console has no login; run it behind single sign-on or use the web console with API keys.
-- The API has no rate limiting yet; put it behind your gateway.
+- Rate limits are per process; run one instance (the event store is a local DuckDB file).
 - The built-in masker covers fewer identifier types than project 10; install project 10 alongside for real use.
 - With no live feed, the demo reports its sources as silent after a few minutes. That is the silence alarm working.
+- The code has not had an independent security review.
+
+See [SECURITY.md](SECURITY.md), [docs/threat-model.md](docs/threat-model.md) and [docs/model-card.md](docs/model-card.md).
+
+## License
+
+MIT. See [LICENSE](LICENSE).
