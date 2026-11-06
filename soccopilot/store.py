@@ -44,7 +44,7 @@ class EventStore:
         self._lock = threading.Lock()
         self.conn = duckdb.connect(self.path)
         self._init_schema()
-        # ponytail: whole event set in memory; page from DuckDB once it outgrows RAM
+        # Whole event set in memory; page from DuckDB once it outgrows RAM
         # (the SQL below only interpolates the COLUMNS constant)
         self._cache: dict[str, NormalizedEvent] = {
             r[0]: _row_to_event(r)

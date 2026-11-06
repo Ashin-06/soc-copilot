@@ -31,7 +31,7 @@ def render_app() -> None:
             st.session_state.copilot = seed_demo_copilot()
             cp = st.session_state.copilot
             st.rerun()
-        # ponytail: a typed name, like the web console's demo mode; put Streamlit behind SSO for real use
+        # A typed name, like the web console's demo mode; put Streamlit behind SSO for real use
         analyst = st.text_input("Analyst name", value=st.session_state.get("analyst", ""), placeholder="e.g. meera.k")
         st.session_state.analyst = analyst.strip()
         ok_chain, chain_msg = cp.audit.verify()

@@ -201,7 +201,7 @@ class SOCCopilot:
         self.alerts.extend(new_alerts)
 
         # Re-correlate active alerts into incidents
-        # ponytail: re-correlates every alert on each batch; window by time once alert volume makes this slow
+        # Re-correlates every alert on each batch; window by time once alert volume makes this slow
         before = {i: set(inc.alert_ids) for i, inc in self.incidents.items()}
         correlated = self.correlator.correlate(self.alerts, self.event_store.all_events(), previous=self.incidents)
         self.incidents = {inc.incident_id: inc for inc in correlated}
