@@ -8,6 +8,18 @@ This copilot:
 - drafts an investigation report with an LLM, citing the log entries behind every statement, without showing the model customer data;
 - suggests containment steps that only run after an analyst approves them.
 
+```mermaid
+flowchart LR
+    S["Log & Payment Sources (Wazuh, CloudTrail, Auth, Switch)"] --> I["1. Ingest & Dedup"]
+    I --> N["2. Normalise Schema"]
+    N --> E["3. Enrich (Asset, Staff, Geo, Threat Intel)"]
+    E --> D["4. Detect (Sigma Rules + MITRE ATT&CK)"]
+    D --> C["5. Correlate Incidents (0-100 Risk Score)"]
+    C --> T["6. Privacy-Masked LLM Triage (Cited Log IDs)"]
+    T --> R["7. Approval-Gated Playbooks & HMAC Audit Log"]
+    R <--> UI["8. Web & Streamlit Analyst Console"]
+```
+
 ```
 Log sources ──► 1 Ingest ──► 2 Normalise ──► 3 Enrich ──► 4 Detect ──► 5 Correlate ──► 6 Triage ──► 7 Respond
                                                                             ▲                          │
