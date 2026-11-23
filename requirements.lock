@@ -37,7 +37,7 @@ jiter==0.18.0
     # via anthropic
 numpy==2.5.4
     # via pandas
-opentelemetry-api==1.45.1
+opentelemetry-api==1.45.2
     # via
     #   anthropic
     #   fastapi
