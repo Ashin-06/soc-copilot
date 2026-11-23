@@ -207,7 +207,7 @@ async function loadQueue() {
         <span class="mono" style="font-weight:700">${esc(inc.incident_id)}</span>
         <div style="display:flex;gap:4px">
           ${inc.security_fraud_joined ? '<span class="pill joined">SEC + FRAUD</span>' : ''}
-          <span class="pill ${esc(inc.severity)}">${esc(inc.severity)} · ${inc.risk_score}</span>
+          <span class="pill ${esc(inc.severity)}">${esc(inc.severity)} · ${esc(inc.risk_score)}</span>
         </div>
       </div>
       <div class="inc-title">${esc(inc.title)}</div>
@@ -222,7 +222,7 @@ async function loadQueue() {
   $("source-list").innerHTML = Object.values(healthRes.sources).map(s =>
     `<div style="display:flex;justify-content:space-between;padding:3px 0;border-bottom:1px solid var(--line)">
       <span>${esc(s.source)}</span>
-      <span>${s.events_accepted} ev · <b style="color:${s.status === 'healthy' ? 'var(--ok)' : 'var(--warn)'}">${esc(s.status)}</b></span>
+      <span>${esc(s.events_accepted)} ev · <b style="color:${s.status === 'healthy' ? 'var(--ok)' : 'var(--warn)'}">${esc(s.status)}</b></span>
     </div>`
   ).join("");
 
@@ -233,12 +233,12 @@ async function loadQueue() {
     <div>Revoked Sessions: <b>${esc(cs.revoked_sessions.join(", ") || "none")}</b></div>
     <div>Disabled Cloud Keys: <b>${esc(cs.disabled_cloud_keys.join(", ") || "none")}</b></div>
     <div>Password Resets: <b>${esc(cs.password_resets.join(", ") || "none")}</b></div>
-    <div>Customer Alerts Sent: <b>${cs.notified_customers.length}</b></div>
+    <div>Customer Alerts Sent: <b>${esc(cs.notified_customers.length)}</b></div>
   `;
 
   $("audit-list").innerHTML = auditRes.entries.slice().reverse().map(e =>
     `<div style="padding:4px 0;border-bottom:1px solid var(--line)">
-      #${e.seq} <b>${esc(e.event)}</b> ${esc(e.incident_id || e.action_id || "")}
+      #${esc(e.seq)} <b>${esc(e.event)}</b> ${esc(e.incident_id || e.action_id || "")}
       <span style="color:var(--muted)">${esc((e.hash || "").slice(0, 10))}…</span>
     </div>`
   ).join("");
@@ -268,10 +268,10 @@ async function loadIncident(id) {
       ${inc.security_fraud_joined ? '<span class="pill joined">Security + Fraud Joined</span>' : ''}
       <span>Status: <b>${esc(inc.status)}</b></span>
       <span>Money at Risk: <b>${inr(inc.money_at_risk)}</b></span>
-      <span>Asset Criticality: <b>${inc.max_asset_criticality}/5</b></span>
+      <span>Asset Criticality: <b>${esc(inc.max_asset_criticality)}/5</b></span>
     </div>
     <div class="meta mono" style="margin-bottom:8px">
-      Score Breakdown: Severity ${bd.rule_severity ?? 0} + Tactics ${bd.tactic_diversity ?? 0} + Asset ${bd.asset_criticality ?? 0} + Money ${bd.money_at_risk_bonus ?? 0} + Sec×Fraud Bonus ${bd.security_fraud_bonus ?? 0} = <b>${inc.risk_score}</b>
+      Score Breakdown: Severity ${esc(bd.rule_severity ?? 0)} + Tactics ${esc(bd.tactic_diversity ?? 0)} + Asset ${esc(bd.asset_criticality ?? 0)} + Money ${esc(bd.money_at_risk_bonus ?? 0)} + Sec×Fraud Bonus ${esc(bd.security_fraud_bonus ?? 0)} = <b>${inc.risk_score}</b>
     </div>
     <div>${inc.entities.map(e => `<span class="entity-chip">${esc(e)}</span>`).join("")}</div>
   `;
@@ -378,14 +378,14 @@ $("btn-eval").addEventListener("click", async () => {
     const res = await api("/evaluate");
     const pct = (x) => `${Math.round(x * 100)}%`;
     $("eval-body").innerHTML = `
-      <p>Detection recall <b>${pct(res.detection_recall)}</b> (${res.campaigns_detected}/${res.campaigns_total}) ·
+      <p>Detection recall <b>${pct(res.detection_recall)}</b> (${esc(res.campaigns_detected)}/${esc(res.campaigns_total)}) ·
          Security + fraud joined <b>${pct(res.security_fraud_join_rate)}</b> ·
-         False-positive incidents on ${res.benign_events_tested} benign events <b>${res.false_positive_incidents_per_day}</b> ·
+         False-positive incidents on ${esc(res.benign_events_tested)} benign events <b>${esc(res.false_positive_incidents_per_day)}</b> ·
          Batch latency <b>${Math.round(res.mean_batch_latency_ms)} ms</b> mean ·
          Report citations <b>${pct(res.report_citation_coverage)}</b></p>
       <table><tr><th>Campaign</th><th>Result</th><th>Incident</th><th>Score</th><th>Events</th></tr>
       ${res.campaigns.map(c => `<tr><td>${esc(c.title)}</td><td>${c.detected ? "detected" : "missed"}</td>
-        <td class="mono">${esc(c.incident_id || "")}</td><td>${c.risk_score}</td><td>${esc(c.events_correlated)}</td></tr>`).join("")}
+        <td class="mono">${esc(c.incident_id || "")}</td><td>${esc(c.risk_score)}</td><td>${esc(c.events_correlated)}</td></tr>`).join("")}
       </table>
       <p class="meta">The rules were tuned on these campaigns, so treat this as a regression check, not real-world recall.
          Score your own data with <span class="mono">python -m soccopilot evaluate --labelled events.jsonl</span>.</p>`;
